@@ -30,7 +30,8 @@ services:
       LLM_API_KEY: ${LLM_API_KEY:?请在 .env 里设置 LLM_API_KEY}
       LLM_BASE_URL: ${LLM_BASE_URL:-https://api.deepseek.com}
       LLM_MODEL: ${LLM_MODEL:-deepseek-flash}
-      APP_PASSWORD: ${APP_PASSWORD:-}
+      APP_USER: ${APP_USER:-salesadmin}
+      APP_PASSWORD: ${APP_PASSWORD:-goodsales}
       SEED_ON_START: ${SEED_ON_START:-true}
     depends_on:
       postgres:
