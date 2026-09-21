@@ -1,5 +1,8 @@
 // S1 · 只初始化两个租户，不初始化客户（决策 Q8：演示客户现场创建）
 // 依据：docs/实施文档.md Part 1.5
+//
+// S6 追加：SEED_ONLY_IF_EMPTY=true 时，库里已经有租户就直接退出。
+// 这样容器启动脚本可以安全地每次都跑 seed —— 服务器重启不会把演示现场改过的规则覆盖回去。
 import { PrismaClient, type Prisma } from '@prisma/client'
 
 const prisma = new PrismaClient()
@@ -92,6 +95,14 @@ const TENANTS = [
 ] as const
 
 async function main() {
+  if (process.env.SEED_ONLY_IF_EMPTY === 'true') {
+    const existing = await prisma.tenant.count()
+    if (existing > 0) {
+      console.log(`seed skipped: ${existing} tenant(s) already present`)
+      return
+    }
+  }
+
   for (const t of TENANTS) {
     await prisma.tenant.upsert({
       where: { slug: t.slug },

@@ -1,23 +1,39 @@
-# S1：本地起 PostgreSQL 用（依据 docs/实施文档.md S1 关键点 + docs/技术栈构建与说明.md 8.1）
-# S6 会在这份文件上补 app 服务、depends_on: service_healthy 与 migrate deploy 入口。
+# S6 · 部署编排（依据 docs/技术栈构建与说明.md 8.1）
 #
-# 注意：宿主机 5432 已被本机已有的 PostgreSQL 服务占用，所以这里映射到 55432
-#       （与 .env 里的 DATABASE_URL 一致）。
+# 关键点：
+#   · postgres 有 healthcheck，app 用 depends_on: condition: service_healthy（否则启动顺序会打架）
+#   · postgres 不映射端口 —— 5432 不对公网开放，只在 compose 内网可达
+#   · 所有环境变量通过这里注入，镜像里不含任何 key
 services:
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
     environment:
-      POSTGRES_PASSWORD: ${PG_PASSWORD}
+      POSTGRES_PASSWORD: ${PG_PASSWORD:?请在服务器上的 .env 里设置 PG_PASSWORD}
       POSTGRES_DB: zigoai
-    ports:
-      - "55432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      test: ["CMD-SHELL", "pg_isready -U postgres -d zigoai"]
       interval: 5s
+      timeout: 3s
       retries: 10
+
+  app:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "80:3000"
+    environment:
+      DATABASE_URL: postgresql://postgres:${PG_PASSWORD}@postgres:5432/zigoai?schema=public
+      LLM_API_KEY: ${LLM_API_KEY:?请在服务器上的 .env 里设置 LLM_API_KEY}
+      LLM_BASE_URL: ${LLM_BASE_URL:-https://api.deepseek.com}
+      LLM_MODEL: ${LLM_MODEL:-deepseek-flash}
+      APP_PASSWORD: ${APP_PASSWORD:-}
+      SEED_ON_START: ${SEED_ON_START:-true}
+    depends_on:
+      postgres:
+        condition: service_healthy
 
 volumes:
   pgdata:
