@@ -26,6 +26,7 @@ export function buildFallbackOutput(input: {
     reply: FALLBACK_REPLY,
     reason: `AI 暂不可用，已转人工（${input.error}）`,
     need_human: true,
+    human_trigger: '',
     rules_hit: [],
     confidence: 0,
   }

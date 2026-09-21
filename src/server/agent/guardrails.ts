@@ -9,10 +9,14 @@ import {
 import type { TenantRule } from '@/lib/types'
 import type { AgentOutputLoose } from './schema'
 
-/**
- * AI 与业务之间的裁决层：模型提出判断，这个文件决定判断能不能生效。
- * 跑在 Zod 校验之后、落库之前。
- */
+//
+// AI 与业务之间的裁决层：模型提出判断，这个文件决定判断能不能生效。
+// 跑在 Zod 校验之后、落库之前。
+//
+// G1–G6 是实施文档 Part 1.4 定稿的六条；G7 是配置改造时补的第七条。
+// 七条的分工：G3 与 G7 是**数据驱动**的（参数来自租户配置），其余五条是纯代码规则。
+// 也就是说：护栏逻辑全租户共用，加新租户不用改这个文件。
+//
 export type GuardrailIssue =
   | 'terminal_stage_locked'
   | 'stage_regression_blocked'
@@ -20,13 +24,16 @@ export type GuardrailIssue =
   | 'human_flag_action_mismatch'
   | 'low_confidence_escalation'
   | 'followup_advance_blocked'
+  | 'human_trigger_matched'
 
 export interface GuardrailContext {
   prevStage: LeadStage
   trigger: Trigger
   rules: TenantRule[]
-  /** 客户说过的全部内容（用于条件判定） */
+  /** 客户说过的**全部**内容（供 G3 判断「是否已提供过证件」这类累计条件） */
   historyText: string
+  /** 租户配置的转人工条件清单（G7 的白名单） */
+  needHumanTriggers: string[]
 }
 
 export interface GuardrailResult {
@@ -70,6 +77,31 @@ export function applyGuardrails(out: AgentOutputLoose, ctx: GuardrailContext): G
     }
   }
 
+  // ── G7 转人工条件（数据驱动：模型报条件，租户配置定白名单） ──
+  //
+  // 分工：模型负责语义 —— 客户说「让真人给我打电话」，它该认出这是配置里的「要求真人」；
+  //       代码负责边界 —— 只能报清单里已有的条件，自己发明的一律作废。
+  // 这样配置里可以继续写**条件描述**（读起来是业务语言），而不是退化成关键词表。
+  //
+  const reported = out.human_trigger.trim()
+  if (reported !== '') {
+    const allowed = ctx.needHumanTriggers.some((t) => t === reported)
+    if (allowed) {
+      if (!out.need_human) {
+        out.need_human = true
+        out.next_action = '转人工'
+        issues.push('human_trigger_matched')
+      }
+      // 无论模型自己有没有置 need_human，都把命中的条件写进 reason，让审计看得见
+      if (!out.reason.includes(reported)) {
+        out.reason = `${out.reason}｜命中转人工条件：${reported}`
+      }
+    } else {
+      // 清单外的条件：作废（模型不能自己发明转人工的理由），清空这个字段避免污染审计
+      out.human_trigger = ''
+    }
+  }
+
   // ── G4 转人工一致性 ──
   if (out.need_human) {
     if (out.next_action !== '转人工') {
@@ -95,9 +127,9 @@ export function applyGuardrails(out: AgentOutputLoose, ctx: GuardrailContext): G
   return { output: out, issues, needsRegen }
 }
 
-/**
- * 重生成时的追加约束。直接点名违反了哪条规则 —— 比「你违反了规则」这种空话有效得多。
- */
+//
+// 重生成时的追加约束。直接点名违反了哪条规则 —— 比「你违反了规则」这种空话有效得多。
+//
 export function buildCorrectionSuffix(
   rules: TenantRule[],
   issues: GuardrailIssue[],
@@ -109,7 +141,7 @@ export function buildCorrectionSuffix(
 
   return [
     '',
-    `## 追加约束（触发于护栏）`,
+    '## 追加约束（触发于护栏）',
     `你上一次的输出违反了规则 ${named}。`,
     '请重新输出 JSON，reply 中不要出现任何具体价格（不要写数字 + 元/块/万）。',
     '改为说明为什么需要先了解更多信息，并给出一个具体的下一步。',

@@ -92,6 +92,16 @@ describe('宽容层刻意容忍的两类脏数据（不让一条脏字段毁掉�
     expect(parseAgentOutput(JSON.stringify({ ...VALID, confidence: 88 })).confidence).toBe(0.5)
   })
 
+  it('少了 human_trigger（G7 的自报条件）→ 兜成空字符串', () => {
+    const parsed = parseAgentOutput(JSON.stringify(VALID))
+    expect(parsed.human_trigger).toBe('')
+  })
+
+  it('human_trigger 是模型报的条件 → 原样保留（是否放行由护栏判定）', () => {
+    const parsed = parseAgentOutput(JSON.stringify({ ...VALID, human_trigger: '投诉' }))
+    expect(parsed.human_trigger).toBe('投诉')
+  })
+
   it('多出来的字段被丢掉，不会流进业务', () => {
     const parsed = parseAgentOutput(JSON.stringify({ ...VALID, 建议: '再送一节课' }))
     expect(parsed).not.toHaveProperty('建议')
@@ -100,8 +110,12 @@ describe('宽容层刻意容忍的两类脏数据（不让一条脏字段毁掉�
 
 describe('严格契约与宽容层的分工', () => {
   it('严格版 AgentOutput 会拒绝越界 confidence（宽容只用在解析路径）', () => {
-    expect(() => AgentOutput.parse({ ...VALID, confidence: 88 })).toThrow()
-    expect(() => AgentOutput.parse(VALID)).not.toThrow()
+    expect(() => AgentOutput.parse({ ...VALID, human_trigger: '', confidence: 88 })).toThrow()
+  })
+
+  it('严格版要求 human_trigger 必填 —— 宽容层才给它兜空字符串', () => {
+    expect(() => AgentOutput.parse(VALID)).toThrow() // VALID 里没有 human_trigger
+    expect(() => AgentOutput.parse({ ...VALID, human_trigger: '' })).not.toThrow()
   })
 
   it('传给模型的契约字段齐全、且全为必填（strict json_schema 的前提）', () => {
@@ -110,6 +124,7 @@ describe('严格契约与宽容层的分工', () => {
       [
         'confidence',
         'customer_intent',
+        'human_trigger',
         'lead_stage',
         'need_human',
         'next_action',

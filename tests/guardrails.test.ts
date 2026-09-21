@@ -8,9 +8,11 @@ import {
 import type { AgentOutputLoose } from '@/server/agent/schema'
 
 /**
- * G1–G6 六条护栏。
+ * G1–G7 七条护栏。
  * 这是全系统最值得测的部分：它是「模型说的话算不算数」的唯一裁决点。
  * 全部是纯函数，不需要数据库、不需要模型 —— 所以快、稳、不花钱。
+ *
+ * 七条里 G3 与 G7 是**数据驱动**的（参数来自租户配置），其余五条是纯代码规则。
  */
 
 /** 造一个「模型刚输出的对象」。每个用例都用全新对象：护栏是**就地改写**的 */
@@ -22,6 +24,7 @@ function modelOutput(partial: Partial<AgentOutputLoose> = {}): AgentOutputLoose 
     reply: '你好呀，需要了解点什么？',
     reason: '测试用的判断依据',
     need_human: false,
+    human_trigger: '',
     rules_hit: [],
     confidence: 0.9,
     ...partial,
@@ -34,6 +37,7 @@ function ctx(partial: Partial<GuardrailContext> = {}): GuardrailContext {
     trigger: 'CUSTOMER_MESSAGE',
     rules: [],
     historyText: '',
+    needHumanTriggers: [],
     ...partial,
   }
 }
@@ -51,6 +55,10 @@ const PRICE_RULE_DOCUMENT: TenantRule = {
   text: '未取得行驶证信息前，不给出具体报价',
   enforcement: { kind: 'FORBID_PRICE_UNTIL', condition: 'DOCUMENT_CONFIRMED' },
 }
+
+/** 与 prisma/seed.ts 一致的两个租户的转人工条件清单 */
+const SWIM_TRIGGERS = ['投诉', '要求真人', '涉及退款', 'AI 无法确认答案']
+const MACHINERY_TRIGGERS = ['投诉', '要求真人', '涉及退款', '纠纷']
 
 describe('G1 终态锁', () => {
   it('WON 被模型改成 INTERESTED → 输出仍是 WON，并记录 terminal_stage_locked', () => {
@@ -196,5 +204,73 @@ describe('G6 跟进不推进阶段', () => {
     )
     expect(result.issues).toContain('stage_regression_blocked')
     expect(result.issues).not.toContain('followup_advance_blocked')
+  })
+})
+
+describe('G7 转人工条件（数据驱动：模型报条件，租户配置定白名单）', () => {
+  it('模型报的条件在清单里 → 强制转人工（哪怕它自己说 need_human=false）', () => {
+    const result = applyGuardrails(
+      modelOutput({ need_human: false, human_trigger: '投诉' }),
+      ctx({ needHumanTriggers: SWIM_TRIGGERS }),
+    )
+    expect(result.output.need_human).toBe(true)
+    expect(result.output.next_action).toBe('转人工')
+    expect(result.issues).toContain('human_trigger_matched')
+    expect(result.output.reason).toContain('投诉')
+  })
+
+  it('条件描述同样可用：模型把「让真人给我打电话」归到「要求真人」→ 校验通过', () => {
+    // 这正是「条件描述」方案的意义：语义识别是模型的活，代码只校验它在不在清单里
+    const result = applyGuardrails(
+      modelOutput({ human_trigger: '要求真人' }),
+      ctx({ needHumanTriggers: SWIM_TRIGGERS }),
+    )
+    expect(result.output.need_human).toBe(true)
+    expect(result.issues).toContain('human_trigger_matched')
+  })
+
+  it('模型自己发明清单外的条件 → 作废：不升级，并把字段清空', () => {
+    const result = applyGuardrails(
+      modelOutput({ human_trigger: '客户想砍价' }),
+      ctx({ needHumanTriggers: SWIM_TRIGGERS }),
+    )
+    expect(result.output.need_human).toBe(false)
+    expect(result.issues).not.toContain('human_trigger_matched')
+    expect(result.output.human_trigger).toBe('')
+  })
+
+  it('租户没配触发词 → 模型报了也不升级', () => {
+    const result = applyGuardrails(
+      modelOutput({ human_trigger: '投诉' }),
+      ctx({ needHumanTriggers: [] }),
+    )
+    expect(result.output.need_human).toBe(false)
+    expect(result.output.human_trigger).toBe('')
+  })
+
+  it('没命中（空字符串）→ 什么都不做', () => {
+    const result = applyGuardrails(
+      modelOutput({ human_trigger: '' }),
+      ctx({ needHumanTriggers: SWIM_TRIGGERS }),
+    )
+    expect(result.issues).toEqual([])
+  })
+
+  it('模型自己已经置了 need_human → 不重复记问题，但条件仍写进 reason', () => {
+    const result = applyGuardrails(
+      modelOutput({ need_human: true, next_action: '转人工', human_trigger: '投诉' }),
+      ctx({ needHumanTriggers: SWIM_TRIGGERS }),
+    )
+    expect(result.issues).toEqual([])
+    expect(result.output.reason).toContain('投诉')
+  })
+
+  it('白名单是按租户配置的：同一条条件在另一个租户不成立', () => {
+    const result = applyGuardrails(
+      modelOutput({ human_trigger: 'AI 无法确认答案' }),
+      ctx({ needHumanTriggers: MACHINERY_TRIGGERS }),
+    )
+    expect(result.output.need_human).toBe(false)
+    expect(result.output.human_trigger).toBe('')
   })
 })

@@ -120,11 +120,13 @@ export async function analyzeCustomerMessage(
     prevStage,
     trigger: input.trigger,
     rules: tenant.config.rules,
-    // 条件判定只看客户说过的话
+    // 累计条件只看客户说过的话（G3 的 DOCUMENT_CONFIRMED 用它）
     historyText: history
       .filter((h) => h.role === 'CUSTOMER')
       .map((h) => h.content)
       .join('\n'),
+    // G7：租户配置的转人工条件清单（模型自报命中哪一条，代码校验它是否在清单里）
+    needHumanTriggers: tenant.config.needHumanTriggers ?? [],
   }
 
   // ── 调模型：绝不在数据库事务里（技术栈文档第 9 节） ──

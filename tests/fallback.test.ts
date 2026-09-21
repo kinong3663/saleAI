@@ -35,6 +35,7 @@ const BASELINE: AgentOutputLoose = {
   reply: '这个是基准状态',
   reason: '测试铺的基线',
   need_human: false,
+  human_trigger: '',
   rules_hit: [],
   confidence: 0.9,
 }
