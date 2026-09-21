@@ -33,15 +33,34 @@ export interface TenantRule {
   enforcement?: TenantRuleEnforcement
 }
 
+/** 报价策略：AUTO = 可以自动报价；HUMAN_ONLY = 即使规则允许也不许自动报（大单） */
+export type QuotePolicy = 'AUTO' | 'HUMAN_ONLY'
+
+//
+// 产品与报价。
+// price 可选是**合法状态**（"需评估后报价"），不是缺数据 —— 机械之家的维修价就必须技师看车后才能给。
+// id 必须有：界面编辑产品时需要稳定标识；靠 name 匹配会在改名时把编辑状态搞乱。
+//
+export interface TenantProduct {
+  id: string
+  name: string
+  price?: number
+  unit?: string
+  description?: string
+  quotePolicy?: QuotePolicy
+  /** 默认 true；false = 下架，不进 prompt（历史 AgentRun 里引用过的产品仍在） */
+  enabled?: boolean
+}
+
 export interface TenantConfig {
   rules: TenantRule[]
   stageDefs: Record<string, string>
   needHumanTriggers: string[]
-  replyTone?: string
   priceFallbackReply: string
   followUpAfterHours: number
   maxFollowUps: number
-  products: { name: string; price?: number }[]
+  products: TenantProduct[]
+  // 注意：replyTone 已删除 —— 语气统一由 Tenant.tone 承载（唯一真源）
 }
 
 /** 给 agent pipeline 用的租户视图（含 config） */

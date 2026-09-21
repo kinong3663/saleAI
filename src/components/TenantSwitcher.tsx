@@ -1,25 +1,33 @@
 'use client'
 
+import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import type { TenantDTO } from '@/lib/types'
 
-/** 顶部租户切换器：换租户 = 换 URL 上的 tenantId，页面重新按新租户取数 */
+// 顶部的租户选择。basePath 决定切换后跳回哪个页面（客户列表 / 租户配置）。
+// 旁边那个「租户配置」入口是配置页的发现路径 —— 文档里它是个独立路由，得有地方点进去。
 export function TenantSwitcher({
   tenants,
   currentTenantId,
+  basePath = '/customers',
 }: {
   tenants: TenantDTO[]
   currentTenantId: string
+  basePath?: string
 }) {
   const router = useRouter()
+  const id = `tenant-switch-${currentTenantId.slice(-6)}`
 
   return (
-    <label className="flex items-center gap-2 text-sm">
-      <span className="text-slate-500">租户</span>
+    <div className="flex items-center gap-2">
+      <label htmlFor={id} className="text-xs text-slate-500">
+        租户
+      </label>
       <select
-        className="rounded border border-slate-300 bg-white px-2 py-1 text-sm"
+        id={id}
         value={currentTenantId}
-        onChange={(e) => router.push(`/customers?tenantId=${e.target.value}`)}
+        onChange={(e) => router.push(`${basePath}?tenantId=${e.target.value}`)}
+        className="rounded border border-slate-300 bg-white px-2 py-1 text-sm"
       >
         {tenants.map((t) => (
           <option key={t.id} value={t.id}>
@@ -27,6 +35,12 @@ export function TenantSwitcher({
           </option>
         ))}
       </select>
-    </label>
+      <Link
+        href={`/settings/tenant?tenantId=${currentTenantId}`}
+        className="text-xs text-blue-600 hover:underline"
+      >
+        租户配置
+      </Link>
+    </div>
   )
 }

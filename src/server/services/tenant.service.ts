@@ -1,3 +1,4 @@
+import type { Prisma } from '@prisma/client'
 import { prisma } from '@/server/db'
 import type { TenantConfig, TenantDTO, TenantForAgent } from '@/lib/types'
 
@@ -40,12 +41,14 @@ export async function getTenantForAgent(tenantId: string): Promise<TenantForAgen
     rules: raw.rules ?? [],
     stageDefs: raw.stageDefs ?? {},
     needHumanTriggers: raw.needHumanTriggers ?? [],
-    replyTone: raw.replyTone,
     priceFallbackReply:
       raw.priceFallbackReply ?? '这个问题我需要请同事帮你确认一下，稍等我回复你～',
     followUpAfterHours: raw.followUpAfterHours ?? 24,
     maxFollowUps: raw.maxFollowUps ?? 2,
-    products: raw.products ?? [],
+    // 读取侧净化：历史配置里的产品可能没有 id（老版本只有 name/price），补一个稳定标识
+    products: (raw.products ?? [])
+      .filter((p) => p && typeof p.name === 'string' && p.name.trim() !== '')
+      .map((p, i) => ({ ...p, id: p.id || `P${i + 1}` })),
   }
 
   return {
@@ -55,4 +58,68 @@ export async function getTenantForAgent(tenantId: string): Promise<TenantForAgen
     tone: row.tone,
     config,
   }
+}
+// ───────── 配置页（/settings/tenant）用的读写 ─────────
+
+export interface TenantDetailView {
+  id: string
+  slug: string
+  name: string
+  industry: string | null
+  salesGoal: string
+  tone: string | null
+  config: TenantConfig
+  updatedAt: string
+}
+
+/** 租户详情：配置页与 GET /api/tenants/:id 用 */
+export async function getTenantDetail(tenantId: string): Promise<TenantDetailView | null> {
+  const row = await prisma.tenant.findUnique({ where: { id: tenantId } })
+  if (!row) return null
+  const raw = (row.config ?? {}) as Partial<TenantConfig>
+  return {
+    id: row.id,
+    slug: row.slug,
+    name: row.name,
+    industry: row.industry,
+    salesGoal: row.salesGoal,
+    tone: row.tone,
+    config: {
+      rules: raw.rules ?? [],
+      stageDefs: raw.stageDefs ?? {},
+      needHumanTriggers: raw.needHumanTriggers ?? [],
+      priceFallbackReply: raw.priceFallbackReply ?? '',
+      followUpAfterHours: raw.followUpAfterHours ?? 24,
+      maxFollowUps: raw.maxFollowUps ?? 2,
+      products: (raw.products ?? [])
+        .filter((p) => p && typeof p.name === 'string' && p.name.trim() !== '')
+        .map((p, i) => ({ ...p, id: p.id || `P${i + 1}` })),
+    },
+    updatedAt: row.updatedAt.toISOString(),
+  }
+}
+
+/** PUT /api/tenants/:id/config —— 整段替换配置（校验在路由层做） */
+export async function replaceTenantConfig(
+  tenantId: string,
+  config: TenantConfig,
+): Promise<TenantDetailView | null> {
+  const exists = await prisma.tenant.findUnique({ where: { id: tenantId }, select: { id: true } })
+  if (!exists) return null
+  await prisma.tenant.update({
+    where: { id: tenantId },
+    data: { config: config as unknown as Prisma.InputJsonValue },
+  })
+  return getTenantDetail(tenantId)
+}
+
+/** PATCH /api/tenants/:id —— 只改基本信息（基本信息不是 JSONB，单独走） */
+export async function updateTenantBasic(
+  tenantId: string,
+  patch: { name?: string; industry?: string | null; salesGoal?: string; tone?: string | null },
+): Promise<TenantDetailView | null> {
+  const exists = await prisma.tenant.findUnique({ where: { id: tenantId }, select: { id: true } })
+  if (!exists) return null
+  await prisma.tenant.update({ where: { id: tenantId }, data: patch })
+  return getTenantDetail(tenantId)
 }

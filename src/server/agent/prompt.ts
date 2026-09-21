@@ -72,21 +72,30 @@ export function buildUserPrompt(ctx: { state: PromptState; history: HistoryRow[]
 //   ② 第六节写着「产品信息不在企业销售目标里就别自行发挥」——
 //      产品放进来，那句约束才有内容可依，模型也才不会对「体验课多少钱」只能空泛反问。
 //
-// 语气取 tenant.tone，缺省时退回 config.replyTone（这两个字段语义重复过，这里接上兜底）。
+// 语气只由 Tenant.tone 承载（config.replyTone 已按 配置改造.md §2.3 删除，唯一真源）。
 //
 function sectionGoal(tenant: TenantLike): string {
   const lines = ['## 一、企业销售目标', tenant.salesGoal]
 
-  const tone = tenant.tone ?? tenant.config.replyTone
+  const tone = tenant.tone
   if (tone) lines.push(`语气要求：${tone}`)
 
-  const products = tenant.config.products ?? []
+  // 下架产品（enabled === false）不进 prompt —— 上下架要立刻生效
+  const products = (tenant.config.products ?? []).filter((p) => p.enabled !== false)
   if (products.length > 0) {
-    const listed = products
-      .map((p) => (p.price == null ? p.name : `${p.name} ${p.price} 元`))
-      .join('、')
-    lines.push(`可售产品与价格：${listed}`)
-    lines.push('（客户问到产品/价格时以这里为准；这里没有的产品不要自行编造）')
+    lines.push('')
+    lines.push('产品与报价（内部资料，用于准确回答客户）')
+    for (const p of products) {
+      const price =
+        p.price == null ? '需评估后报价' : `${p.price.toLocaleString('en-US')} ${p.unit ?? '元'}`
+      lines.push(`- [${p.id}] ${p.name} — ${price}`)
+      if (p.description) lines.push(`      ${p.description}`)
+    }
+    lines.push('')
+    lines.push('报价规则（重要）')
+    lines.push('- 上表是真实价格，但**是否可以说出口由「企业销售规则」决定**；规则禁止报价时，不要说出任何具体数字，改为引导')
+    lines.push('- 只允许使用上表中的价格，**不要计算、推测或编造任何价格**（例如自行折算单课时价格）')
+    lines.push('- 客户问及上表没有的产品，如实说「这个我需要确认一下」，不要猜')
   }
 
   return lines.join('\n')

@@ -6,7 +6,7 @@ import {
   type LeadStage,
   type Trigger,
 } from '@/lib/constants'
-import type { TenantRule } from '@/lib/types'
+import type { TenantProduct, TenantRule } from '@/lib/types'
 import type { AgentOutputLoose } from './schema'
 
 //
@@ -25,6 +25,11 @@ export type GuardrailIssue =
   | 'low_confidence_escalation'
   | 'followup_advance_blocked'
   | 'human_trigger_matched'
+  | 'human_only_price_leaked'
+  // P5：不认识的强制种类不静默跳过 —— 有人直连改库时，只有运行时可观测能兜住
+  | `unknown_enforcement_kind:${string}`
+  // G8：回复里出现了产品表里没有的价格
+  | `fabricated_price:${string}`
 
 export interface GuardrailContext {
   prevStage: LeadStage
@@ -34,6 +39,8 @@ export interface GuardrailContext {
   historyText: string
   /** 租户配置的转人工条件清单（G7 的白名单） */
   needHumanTriggers: string[]
+  /** 租户配置的产品表（G3 的对象维度 + G8 的已知价格集合） */
+  products: TenantProduct[]
 }
 
 export interface GuardrailResult {
@@ -65,16 +72,53 @@ export function applyGuardrails(out: AgentOutputLoose, ctx: GuardrailContext): G
     issues.push('followup_advance_blocked')
   }
 
-  // ── G3 报价规则（数据驱动，不是硬编码租户名） ──
+  const knownPrices = new Set(
+    ctx.products
+      .filter((p) => p.enabled !== false)
+      .map((p) => p.price)
+      .filter((n): n is number => typeof n === 'number'),
+  )
+  const saidPrices = extractPrices(out.reply)
+
+  // ── G3 报价约束（两个维度） ──
+  // 时间维度：什么时候允许报价 —— 由规则决定
   for (const rule of ctx.rules) {
     const e = rule.enforcement
-    if (e?.kind !== 'FORBID_PRICE_UNTIL') continue
+    if (!e) continue
+    if (e.kind !== 'FORBID_PRICE_UNTIL') {
+      // P5：不静默跳过。写进 guardrailIssues，等于给未来埋一个搜索锚点
+      issues.push(`unknown_enforcement_kind:${rule.id}`)
+      continue
+    }
     if (isConditionMet(e.condition, out, ctx)) continue // 条件已满足 → 允许报价
-    if (CONCRETE_PRICE.test(out.reply)) {
+    if (saidPrices.length > 0) {
       issues.push('price_rule_violated')
       out.rules_hit = [...new Set([...out.rules_hit, rule.id])]
       needsRegen = true
     }
+  }
+
+  // 对象维度：哪些产品允许自动报价 —— 由产品决定
+  // 引流品随口报是获客，大单报价会毁掉谈判空间，所以 HUMAN_ONLY 的产品即使规则允许也不许自动说。
+  const humanOnlyPrices = new Set(
+    ctx.products
+      .filter((p) => p.enabled !== false && p.quotePolicy === 'HUMAN_ONLY')
+      .map((p) => p.price)
+      .filter((n): n is number => typeof n === 'number'),
+  )
+  if (saidPrices.some((n) => humanOnlyPrices.has(n))) {
+    issues.push('human_only_price_leaked')
+    out.need_human = true
+    out.next_action = '转人工'
+    needsRegen = true
+  }
+
+  // ── G8 禁止编造价格 ──
+  // 回复里的价格必须命中产品表的已知价格集合（用**数值**比较：'1980'.includes('198') 是 true，子串判断会放行假价格）
+  const fabricated = saidPrices.filter((n) => !knownPrices.has(n))
+  if (fabricated.length > 0) {
+    issues.push(`fabricated_price:${fabricated.join(',')}`)
+    needsRegen = true
   }
 
   // ── G7 转人工条件（数据驱动：模型报条件，租户配置定白名单） ──
@@ -150,8 +194,23 @@ export function buildCorrectionSuffix(
 
 // ───────── 内部 ─────────
 
-/** 具体价格：数字 + 货币单位。刻意不匹配「4 岁」「3 天」这类非价格数字。 */
-const CONCRETE_PRICE = /(\d+(?:\.\d+)?)\s*(?:元|块钱|块|万|K|k)/
+//
+// 从回复里抽出具体价格（元为基准）。
+// 必须是**数值**比较，不能用子串：'1980'.includes('198') 是 true，
+// 会把"1980 元"误认成合法价格 198。
+// 刻意不匹配「4 岁」「3 天」这类非价格数字。
+//
+function extractPrices(text: string): number[] {
+  const out: number[] = []
+  const pattern = /(\d[\d,]*(?:\.\d+)?)\s*(万|块钱|元|块|K|k)/g
+  for (const m of text.matchAll(pattern)) {
+    const value = Number(m[1].replace(/,/g, ''))
+    if (!Number.isFinite(value)) continue
+    const unit = m[2]
+    out.push(unit === '万' ? value * 10_000 : unit === 'K' || unit === 'k' ? value * 1000 : value)
+  }
+  return out
+}
 
 function isConditionMet(
   condition: string,

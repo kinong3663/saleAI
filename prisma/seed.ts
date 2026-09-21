@@ -42,12 +42,31 @@ const TENANTS = [
         LOST: '明确拒绝或长期无响应',
       },
       needHumanTriggers: ['投诉', '要求真人', '涉及退款', 'AI 无法确认答案'],
-      replyTone: '亲切、简短、口语化，不超过 80 字',
       priceFallbackReply:
         '具体价格跟课程类型和课时有关，我先了解一下孩子的情况，再给你准确的推荐，可以吗？',
       followUpAfterHours: 24,
       maxFollowUps: 2,
-      products: [{ name: '亲子游泳体验课', price: 198 }],
+      // 引流品可自动报，大单必须人工谈 —— 报价的"对象维度"
+      products: [
+        {
+          id: 'P1',
+          name: '亲子游泳体验课',
+          price: 198,
+          unit: '元/次',
+          description: '含 1 次体验课 + 1 次体质评估',
+          quotePolicy: 'AUTO',
+          enabled: true,
+        },
+        {
+          id: 'P2',
+          name: '24 课时课包',
+          price: 4680,
+          unit: '元',
+          description: '含 24 次课 + 阶段性评估',
+          quotePolicy: 'HUMAN_ONLY',
+          enabled: true,
+        },
+      ],
     },
   },
   {
@@ -84,12 +103,20 @@ const TENANTS = [
         LOST: '明确拒绝或长期无响应',
       },
       needHumanTriggers: ['投诉', '要求真人', '涉及退款', '纠纷'],
-      replyTone: '干脆、专业、不绕弯，不超过 80 字',
       priceFallbackReply:
         '维修价得看车况才能定。你把行驶证拍给我，我让技师先看车型，大概区间就能给你。',
       followUpAfterHours: 48,
       maxFollowUps: 2,
-      products: [],
+      // 没有价格的产品是合法状态：维修价必须技师看车后才能给
+      products: [
+        {
+          id: 'P1',
+          name: '保险理赔维修',
+          description: '需技师看车、核对行驶证后报价',
+          quotePolicy: 'AUTO',
+          enabled: true,
+        },
+      ],
     },
   },
 ] as const

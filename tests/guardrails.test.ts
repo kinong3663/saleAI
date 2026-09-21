@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import type { TenantRule } from '@/lib/types'
+import type { TenantProduct, TenantRule } from '@/lib/types'
 import {
   applyGuardrails,
   buildCorrectionSuffix,
@@ -38,9 +38,16 @@ function ctx(partial: Partial<GuardrailContext> = {}): GuardrailContext {
     rules: [],
     historyText: '',
     needHumanTriggers: [],
+    products: [],
     ...partial,
   }
 }
+
+/** 与 prisma/seed.ts 一致的乐蒙产品表：P1 引流品可自动报，P2 大单仅人工 */
+const SWIM_PRODUCTS: TenantProduct[] = [
+  { id: 'P1', name: '亲子游泳体验课', price: 198, unit: '元/次', quotePolicy: 'AUTO', enabled: true },
+  { id: 'P2', name: '24 课时课包', price: 4680, unit: '元', quotePolicy: 'HUMAN_ONLY', enabled: true },
+]
 
 const PRICE_RULE_INTEREST: TenantRule = {
   id: 'R1',
@@ -106,7 +113,7 @@ describe('G3 报价护栏（数据驱动，不是硬编码租户名）', () => {
   it('条件满足（客户已表达兴趣）→ 允许报价', () => {
     const result = applyGuardrails(
       modelOutput({ customer_intent: '询价', reply: '体验课 198 元，本周还有位置' }),
-      ctx({ rules: [PRICE_RULE_INTEREST] }),
+      ctx({ rules: [PRICE_RULE_INTEREST], products: SWIM_PRODUCTS }),
     )
     expect(result.issues).not.toContain('price_rule_violated')
     expect(result.needsRegen).toBe(false)
@@ -272,5 +279,70 @@ describe('G7 转人工条件（数据驱动：模型报条件，租户配置定�
     )
     expect(result.output.need_human).toBe(false)
     expect(result.output.human_trigger).toBe('')
+  })
+})
+describe('G3 对象维度 + G8 禁止编造价格（P1 新增）', () => {
+  it('HUMAN_ONLY 的产品价格被说出口 → 强制转人工 + 打回重生成', () => {
+    const result = applyGuardrails(
+      modelOutput({ customer_intent: '询价', reply: '课包 4680 元，很划算' }),
+      ctx({ products: SWIM_PRODUCTS }),
+    )
+    expect(result.issues).toContain('human_only_price_leaked')
+    expect(result.output.need_human).toBe(true)
+    expect(result.output.next_action).toBe('转人工')
+    expect(result.needsRegen).toBe(true)
+  })
+
+  it('AUTO 产品的价格可以正常说出口（引流品随口报是获客手段）', () => {
+    const result = applyGuardrails(
+      modelOutput({ customer_intent: '询价', reply: '体验课 198 元，本周还有位置' }),
+      ctx({ products: SWIM_PRODUCTS }),
+    )
+    expect(result.issues).toEqual([])
+    expect(result.needsRegen).toBe(false)
+  })
+
+  it('产品表里没有的价格 → G8 判定为编造并打回', () => {
+    const result = applyGuardrails(
+      modelOutput({ customer_intent: '询价', reply: '体验课原价 298 元，现在有优惠' }),
+      ctx({ products: SWIM_PRODUCTS }),
+    )
+    expect(result.issues).toContain('fabricated_price:298')
+    expect(result.needsRegen).toBe(true)
+  })
+
+  it('数值比较而不是子串：「1980 元」不算合法价格 198', () => {
+    const result = applyGuardrails(
+      modelOutput({ customer_intent: '询价', reply: '总共 1980 元' }),
+      ctx({ products: SWIM_PRODUCTS }),
+    )
+    expect(result.issues).toContain('fabricated_price:1980')
+  })
+
+  it('产品下架（enabled=false）→ 它的价格就变成"编造"', () => {
+    const disabled = SWIM_PRODUCTS.map((p) => (p.id === 'P1' ? { ...p, enabled: false } : p))
+    const result = applyGuardrails(
+      modelOutput({ customer_intent: '询价', reply: '体验课 198 元' }),
+      ctx({ products: disabled }),
+    )
+    expect(result.issues).toContain('fabricated_price:198')
+  })
+
+  it('没有价格可报的租户（机械之家）→ 任何「数字+元」都是编造', () => {
+    const result = applyGuardrails(modelOutput({ reply: '大概 800 元' }), ctx({ products: [] }))
+    expect(result.issues).toContain('fabricated_price:800')
+  })
+})
+
+describe('P5 未知 enforcement kind 不静默跳过', () => {
+  it('配置里出现代码不认识的 kind → 记进 guardrailIssues（而不是悄悄 continue）', () => {
+    const weird = {
+      id: 'R9',
+      type: 'PROHIBIT',
+      text: '瞎写的约束',
+      enforcement: { kind: 'FORBID_ANYTHING', condition: 'INTEREST_EXPRESSED' },
+    } as unknown as TenantRule
+    const result = applyGuardrails(modelOutput(), ctx({ rules: [weird] }))
+    expect(result.issues).toContain('unknown_enforcement_kind:R9')
   })
 })
