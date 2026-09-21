@@ -5,10 +5,16 @@
 # 为什么不用 Next 的 standalone 产物：容器里还要跑 prisma CLI（migrate）和 tsx（seed），
 # standalone 需要手工挑 node_modules 子集，脆；直接带一份完整依赖更稳。
 # 代价是镜像偏大 —— 24H 交付里这个取舍是划算的，README 的 Trade-offs 会写明。
+#
+# 国内构建的两个必要设置（实测踩过）：
+#   · PRISMA_ENGINES_MIRROR —— @prisma/client 的 postinstall 会去 binaries.prisma.sh 下引擎，
+#     国内到那里会无限挂起（我实测卡了 10 分钟 0% CPU）。走 npmmirror 的 binary 通道 0.26s 就拿到。
+#   · npm 走 lockfile 里的 registry.npmmirror.com（安装时用的就是它），不额外配置。
 
 FROM node:22-bookworm-slim AS builder
 
-ENV NEXT_TELEMETRY_DISABLED=1
+ENV NEXT_TELEMETRY_DISABLED=1 \
+    PRISMA_ENGINES_MIRROR=https://registry.npmmirror.com/-/binary/prisma/
 WORKDIR /app
 
 # Prisma 引擎需要 openssl
@@ -28,7 +34,8 @@ FROM node:22-bookworm-slim AS runner
 ENV NODE_ENV=production \
     NEXT_TELEMETRY_DISABLED=1 \
     PORT=3000 \
-    HOSTNAME=0.0.0.0
+    HOSTNAME=0.0.0.0 \
+    PRISMA_ENGINES_MIRROR=https://registry.npmmirror.com/-/binary/prisma/
 WORKDIR /app
 
 RUN apt-get update \
