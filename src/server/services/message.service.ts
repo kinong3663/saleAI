@@ -1,7 +1,8 @@
 import { Prisma } from '@prisma/client'
 import { prisma } from '@/server/db'
 import { NotFoundError } from '@/server/errors'
-import type { MessageDTO, MessageRoleValue } from '@/lib/types'
+import type { AgentOutput, MessageDTO, MessageRoleValue } from '@/lib/types'
+import { markSalesReplySent } from './state.service'
 
 /** 会话页一次拉多少条。注意这与 prompt 的 HISTORY_LIMIT（决策 Q9）不是同一个常量。 */
 const MESSAGE_PAGE_SIZE = 50
@@ -95,4 +96,79 @@ export async function appendMessage(
     }
     throw e
   }
+}
+
+export interface SendSalesReplyInput {
+  content: string
+  /** 销售这次回复的是哪一条 AI 建议；带上它才能回填 suggestionSent / suggestionEdited */
+  runId?: string | null
+  clientMsgId?: string | null
+}
+
+export interface SendSalesReplyResult {
+  message: MessageDTO
+  source: string
+  suggestionEdited: boolean
+}
+
+/**
+ * 销售确认发送（S5 关键点）。
+ *
+ * 一个事务里做四件事：
+ *   ① 写 SALES 消息  ② 更新 lastSalesMessageAt / lastActivityAt  ③ 回填 suggestionSent / suggestionEdited
+ *   ④ 顶一下 customer.updatedAt（列表排序用）
+ *
+ * source 的取值：带了 runId 就是 ai_suggested（哪怕销售改过字），否则是 manual。
+ * 「改过没有」不靠前端声明，而是拿 sent 的内容和 AgentRun.output.reply 比 —— 前端可以撒谎，
+ * 数据库里的两份内容不会。
+ */
+export async function sendSalesReply(
+  tenantId: string,
+  customerId: string,
+  input: SendSalesReplyInput,
+): Promise<SendSalesReplyResult> {
+  const owned = await prisma.customer.findFirst({
+    where: { id: customerId, tenantId, archivedAt: null },
+    select: { id: true },
+  })
+  if (!owned) throw new NotFoundError('customer_not_found')
+
+  let run = null
+  if (input.runId) {
+    run = await prisma.agentRun.findFirst({
+      where: { id: input.runId, tenantId, customerId },
+    })
+    if (!run) throw new NotFoundError('agent_run_not_found')
+  }
+
+  const suggestedReply = ((run?.output ?? null) as AgentOutput | null)?.reply ?? null
+  const source = run ? 'ai_suggested' : 'manual'
+  const suggestionEdited =
+    suggestedReply !== null && suggestedReply.trim() !== input.content.trim()
+  const at = new Date()
+
+  const created = await prisma.$transaction(async (tx) => {
+    const row = await tx.message.create({
+      data: {
+        tenantId,
+        customerId,
+        role: 'SALES',
+        content: input.content,
+        source,
+        clientMsgId: input.clientMsgId ?? null,
+        createdAt: at,
+      },
+    })
+    await markSalesReplySent(tenantId, customerId, at, tx)
+    if (run) {
+      await tx.agentRun.update({
+        where: { id: run.id },
+        data: { suggestionSent: true, suggestionEdited },
+      })
+    }
+    await tx.customer.update({ where: { id: customerId }, data: { updatedAt: at } })
+    return row
+  })
+
+  return { message: toDTO(created), source, suggestionEdited }
 }

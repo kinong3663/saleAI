@@ -1,3 +1,7 @@
+'use client'
+
+import { useState } from 'react'
+import { useRouter } from 'next/navigation'
 import type { AgentRunDTO } from '@/lib/types'
 import { formatDateTime } from '@/lib/datetime'
 import { StageBadge } from './StageBadge'
@@ -18,9 +22,88 @@ const ISSUE_LABEL: Record<string, string> = {
   followup_advance_blocked: '跟进不推进阶段',
 }
 
-/** AI 建议卡片：意图 / 阶段 / 动作 / 命中规则（高亮）/ 建议回复 / 判断依据 */
-export function SuggestionCard({ run }: { run: AgentRunDTO }) {
+/**
+ * AI 建议卡片：判断结果 + **可编辑的建议回复** + 发送 + 解除人工。
+ *
+ * 编辑后发送仍然记 source = ai_suggested；「改没改过」由后端拿内容和
+ * AgentRun.output.reply 比出来（前端说了不算）。
+ */
+export function SuggestionCard({
+  run,
+  tenantId,
+  customerId,
+  needHuman,
+  humanReason,
+}: {
+  run: AgentRunDTO
+  tenantId: string
+  customerId: string
+  needHuman: boolean
+  humanReason: string | null
+}) {
+  const router = useRouter()
+  const [draft, setDraft] = useState(run.output?.reply ?? '')
+  const [phase, setPhase] = useState<'idle' | 'sending' | 'resolving'>('idle')
+  const [error, setError] = useState<string | null>(null)
+  const [note, setNote] = useState<string | null>(null)
+
   const output = run.output
+  const busy = phase !== 'idle'
+  const edited = output ? draft.trim() !== output.reply.trim() : false
+  const canSend = Boolean(output) && draft.trim().length > 0 && !busy
+
+  async function onSend() {
+    if (!canSend) return
+    setPhase('sending')
+    setError(null)
+    setNote(null)
+    try {
+      const res = await fetch(`/api/customers/${customerId}/reply`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ tenantId, content: draft.trim(), runId: run.id }),
+      })
+      const data = (await res.json().catch(() => null)) as {
+        source?: string
+        suggestionEdited?: boolean
+      } | null
+      if (!res.ok) {
+        setError(`发送失败（HTTP ${res.status}）`)
+        return
+      }
+      setNote(
+        `已发送（source=${data?.source ?? 'ai_suggested'}，${data?.suggestionEdited ? '内容有编辑' : '原文未改'}）`,
+      )
+      router.refresh()
+    } catch {
+      setError('网络错误，请重试')
+    } finally {
+      setPhase('idle')
+    }
+  }
+
+  async function onResolveHuman() {
+    setPhase('resolving')
+    setError(null)
+    setNote(null)
+    try {
+      const res = await fetch(`/api/customers/${customerId}/resolve-human`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ tenantId }),
+      })
+      if (!res.ok) {
+        setError(`解除人工失败（HTTP ${res.status}）`)
+        return
+      }
+      setNote('已解除人工（写入了 humanResolvedAt）')
+      router.refresh()
+    } catch {
+      setError('网络错误，请重试')
+    } finally {
+      setPhase('idle')
+    }
+  }
 
   return (
     <section className="rounded border border-slate-200 bg-white p-4">
@@ -34,6 +117,24 @@ export function SuggestionCard({ run }: { run: AgentRunDTO }) {
           {run.status}
         </span>
       </div>
+
+      {needHuman && (
+        <div className="mt-3 rounded border border-red-200 bg-red-50 p-3">
+          <div className="flex items-center gap-2 text-sm font-medium text-red-700">
+            <span className="inline-block h-2 w-2 rounded-full bg-red-500" />
+            已转人工（need_human 棘轮：AI 无权撤销）
+          </div>
+          {humanReason && <p className="mt-1 text-xs text-red-700/80">原因：{humanReason}</p>}
+          <button
+            type="button"
+            onClick={onResolveHuman}
+            disabled={busy}
+            className="mt-2 rounded border border-red-300 bg-white px-3 py-1 text-xs text-red-700 disabled:opacity-50"
+          >
+            {phase === 'resolving' ? '处理中…' : '解除人工'}
+          </button>
+        </div>
+      )}
 
       {output ? (
         <div className="mt-3 space-y-3 text-sm">
@@ -68,9 +169,33 @@ export function SuggestionCard({ run }: { run: AgentRunDTO }) {
           </div>
 
           <div>
-            <div className="text-xs text-slate-500">建议回复</div>
-            <div className="mt-1 whitespace-pre-wrap rounded bg-slate-50 px-3 py-2">
-              {output.reply}
+            <div className="flex items-center justify-between">
+              <span className="text-xs text-slate-500">建议回复（可编辑）</span>
+              {edited && <span className="text-xs text-amber-700">已修改</span>}
+            </div>
+            <textarea
+              className="mt-1 w-full rounded border border-slate-300 bg-white px-3 py-2 text-sm"
+              rows={4}
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+            />
+            <div className="mt-2 flex items-center gap-3">
+              <button
+                type="button"
+                onClick={onSend}
+                disabled={!canSend}
+                className="rounded bg-blue-600 px-3 py-1.5 text-sm text-white disabled:opacity-40"
+              >
+                {phase === 'sending' ? '发送中…' : '发送'}
+              </button>
+              <button
+                type="button"
+                onClick={() => setDraft(output.reply)}
+                disabled={busy || !edited}
+                className="rounded border border-slate-300 px-3 py-1.5 text-sm text-slate-600 disabled:opacity-40"
+              >
+                还原 AI 原文
+              </button>
             </div>
           </div>
 
@@ -89,18 +214,15 @@ export function SuggestionCard({ run }: { run: AgentRunDTO }) {
               </ul>
             </div>
           )}
-
-          {output.need_human && (
-            <div className="rounded bg-red-50 px-3 py-2 text-xs text-red-700">
-              建议人工介入（need_human = true）
-            </div>
-          )}
         </div>
       ) : (
         <p className="mt-3 text-sm text-red-600">
           本次判定没有拿到可用结果：{run.error ?? '未知原因'}
         </p>
       )}
+
+      {error && <p className="mt-3 text-xs text-red-600">{error}</p>}
+      {note && <p className="mt-3 text-xs text-emerald-700">{note}</p>}
 
       <div className="mt-4 border-t border-slate-200 pt-2 text-xs text-slate-400">
         {run.model} · {run.latencyMs}ms · 第 {run.attempt} 次调用 · {formatDateTime(run.createdAt)}

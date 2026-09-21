@@ -5,6 +5,7 @@ import { prisma } from '@/server/db'
 import { NotFoundError } from '@/server/errors'
 import { getCustomerState } from '@/server/services/customer.service'
 import { listMessages } from '@/server/services/message.service'
+import { applyAnalysisToState, type StateDb } from '@/server/services/state.service'
 import { getTenantForAgent } from '@/server/services/tenant.service'
 import {
   applyGuardrails,
@@ -22,9 +23,11 @@ import { parseAgentOutput, type AgentOutput, type AgentOutputLoose } from './sch
  *
  * 一条客户消息进来之后发生了什么：
  *   幂等检查 → 读租户配置 + 客户状态 + 最近 HISTORY_LIMIT 条历史 → 渲染 prompt
- *   → 调 LLM（**不在事务里**）→ Zod 校验 → 护栏裁决 →（必要时）带约束重生成一次 → 落一条 AgentRun
+ *   → 调 LLM（**不在事务里**）→ Zod 校验 → 护栏裁决 →（必要时）带约束重生成一次
+ *   → 一个事务里落 AgentRun + 更新 CustomerState
  *
- * ⚠️ 本段（S3/S4）**不写 CustomerState** —— 状态闭环是 S5 的事。
+ * 状态迁移只由 trigger = CUSTOMER_MESSAGE 驱动（决策 Q13），
+ * 收紧点在 state.service.applyAnalysisToState 里，不在这个文件。
  */
 
 export interface AnalyzeInput {
@@ -89,6 +92,7 @@ export async function analyzeCustomerMessage(
   const inputDigest = {
     trigger: input.trigger,
     prevStage,
+    prevNeedHuman: customer.state?.needHuman ?? false,
     historyCount: history.length,
     strictUnsupported: isStrictUnsupported(),
     system,
@@ -186,6 +190,8 @@ export async function analyzeCustomerMessage(
     }
   }
 
+  // ── 一个事务：AgentRun + CustomerState（状态只在这里变） ──
+  const analyzedAt = new Date()
   const run = await saveRun({
     tenantId,
     customerId,
@@ -199,6 +205,13 @@ export async function analyzeCustomerMessage(
     rulesHit: output.rules_hit,
     guardrailIssues: issues,
     error: null,
+    applyState: (db: StateDb) =>
+      applyAnalysisToState(
+        tenantId,
+        customerId,
+        { trigger: input.trigger, output, at: analyzedAt },
+        db,
+      ),
   })
 
   return { ok: true, reused: false, run }
@@ -216,11 +229,25 @@ export async function getLatestAgentRun(
   return row ? toRunDTO(row) : null
 }
 
+/** 状态时间线：用 AgentRun 当历史（没有单独的状态历史表，判定记录本身就是变更记录） */
+export async function getRecentAgentRuns(
+  tenantId: string,
+  customerId: string,
+  take = 10,
+): Promise<AgentRunDTO[]> {
+  const rows = await prisma.agentRun.findMany({
+    where: { tenantId, customerId },
+    orderBy: { createdAt: 'desc' },
+    take,
+  })
+  return rows.map(toRunDTO)
+}
+
 // ───────── 内部 ─────────
 
 type AgentRunRow = Prisma.AgentRunGetPayload<Record<string, never>>
 
-async function saveRun(input: {
+interface SaveRunInput {
   tenantId: string
   customerId: string
   triggerMessageId: string | null
@@ -233,31 +260,40 @@ async function saveRun(input: {
   rulesHit: string[]
   guardrailIssues: string[]
   error: string | null
-}): Promise<AgentRunDTO> {
+  /** 与 AgentRun 同事务执行的状态更新；失败路径不传（状态不前进） */
+  applyState?: (db: StateDb) => Promise<void>
+}
+
+async function saveRun(input: SaveRunInput): Promise<AgentRunDTO> {
   try {
-    const row = await prisma.agentRun.create({
-      data: {
-        tenantId: input.tenantId,
-        customerId: input.customerId,
-        triggerMessageId: input.triggerMessageId,
-        status: input.status,
-        model: getLlmModel(),
-        latencyMs: input.latencyMs,
-        attempt: input.attempt,
-        inputDigest: input.inputDigest,
-        rawOutput: input.rawOutput,
-        output:
-          input.output === null
-            ? Prisma.JsonNull
-            : (input.output as unknown as Prisma.InputJsonValue),
-        rulesHit: input.rulesHit.join(','),
-        guardrailIssues: input.guardrailIssues.join(','),
-        error: input.error,
-      },
+    const row = await prisma.$transaction(async (tx) => {
+      const created = await tx.agentRun.create({
+        data: {
+          tenantId: input.tenantId,
+          customerId: input.customerId,
+          triggerMessageId: input.triggerMessageId,
+          status: input.status,
+          model: getLlmModel(),
+          latencyMs: input.latencyMs,
+          attempt: input.attempt,
+          inputDigest: input.inputDigest,
+          rawOutput: input.rawOutput,
+          output:
+            input.output === null
+              ? Prisma.JsonNull
+              : (input.output as unknown as Prisma.InputJsonValue),
+          rulesHit: input.rulesHit.join(','),
+          guardrailIssues: input.guardrailIssues.join(','),
+          error: input.error,
+        },
+      })
+      if (input.applyState) await input.applyState(tx)
+      return created
     })
     return toRunDTO(row)
   } catch (e) {
     // 并发下同一条消息可能被判定两次：唯一约束说了算，读回已存在的那条
+    // （事务已回滚，所以这次不会重复改状态）
     const duplicated =
       e instanceof Prisma.PrismaClientKnownRequestError &&
       e.code === 'P2002' &&
@@ -285,6 +321,8 @@ function toRunDTO(row: AgentRunRow): AgentRunDTO {
     rulesHit: splitList(row.rulesHit),
     guardrailIssues: splitList(row.guardrailIssues),
     error: row.error,
+    suggestionSent: row.suggestionSent,
+    suggestionEdited: row.suggestionEdited,
     createdAt: row.createdAt.toISOString(),
   }
 }

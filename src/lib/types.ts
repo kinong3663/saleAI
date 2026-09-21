@@ -6,6 +6,7 @@
 
 // 只借类型，不引入运行时依赖：前端组件 import 这个文件不会把 agent/ 打进 bundle
 import type { AgentOutput } from '@/server/agent/schema'
+export type { AgentOutput }
 
 /** 与数据库的 MessageRole 枚举保持一致（枚举的唯一定义在 src/lib/constants.ts） */
 export type MessageRoleValue = 'CUSTOMER' | 'SALES' | 'SYSTEM'
@@ -52,14 +53,18 @@ export interface TenantForAgent {
   config: TenantConfig
 }
 
-// ─────────── 客户与消息 ───────────
+// ─────────── 客户与状态 ───────────
 
 export interface CustomerStateDTO {
   leadStage: string
   intent: string | null
   needHuman: boolean
   humanReason: string | null
+  /** 销售手动解除人工的时间；有值说明棘轮被人工开过闸 */
+  humanResolvedAt: string | null
   lastActivityAt: string | null
+  /** 每次状态变更 +1，用于看出「这条状态改过几次」 */
+  version: number
 }
 
 export interface CustomerSummary {
@@ -70,7 +75,7 @@ export interface CustomerSummary {
   tags: string
   createdAt: string
   updatedAt: string
-  /** 客户状态可能还不存在（状态由 S5 的闭环写入），所以这里是可空的 */
+  /** 客户状态可能还不存在（第一条客户消息被判定后才会写），所以这里是可空的 */
   state: CustomerStateDTO | null
 }
 
@@ -106,5 +111,8 @@ export interface AgentRunDTO {
   rulesHit: string[]
   guardrailIssues: string[]
   error: string | null
+  /** 采纳情况（决策记录第 3 节假设①：字段保留并写入，不做 UI） */
+  suggestionSent: boolean
+  suggestionEdited: boolean
   createdAt: string
 }

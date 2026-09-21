@@ -22,13 +22,15 @@ function toSummary(row: CustomerWithState): CustomerSummary {
           intent: row.state.intent,
           needHuman: row.state.needHuman,
           humanReason: row.state.humanReason,
+          humanResolvedAt: row.state.humanResolvedAt?.toISOString() ?? null,
           lastActivityAt: row.state.lastActivityAt?.toISOString() ?? null,
+          version: row.state.version,
         }
       : null,
   }
 }
 
-/** 客户列表：永远带 state（哪怕现在还没有状态行），并按最近活动倒序 */
+/** 客户列表：永远带 state，并按最近活动倒序 */
 export async function listCustomers(tenantId: string): Promise<CustomerSummary[]> {
   const rows = await prisma.customer.findMany({
     where: { tenantId, archivedAt: null },

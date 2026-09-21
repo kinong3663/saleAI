@@ -3,9 +3,10 @@ import { notFound, redirect } from 'next/navigation'
 import { AnalyzePanel } from '@/components/AnalyzePanel'
 import { MessageComposer } from '@/components/MessageComposer'
 import { StageBadge } from '@/components/StageBadge'
+import { StageTimeline } from '@/components/StageTimeline'
 import { SuggestionCard } from '@/components/SuggestionCard'
 import { formatDateTime } from '@/lib/datetime'
-import { getLatestAgentRun } from '@/server/agent/analyze'
+import { getLatestAgentRun, getRecentAgentRuns } from '@/server/agent/analyze'
 import { getCustomer } from '@/server/services/customer.service'
 import { getTenant } from '@/server/services/tenant.service'
 
@@ -33,7 +34,11 @@ export default async function CustomerWorkbenchPage({
   const customer = await getCustomer(tenantId, id)
   if (!customer) notFound()
 
-  const latestRun = await getLatestAgentRun(tenantId, id)
+  const [latestRun, recentRuns] = await Promise.all([
+    getLatestAgentRun(tenantId, id),
+    getRecentAgentRuns(tenantId, id, 8),
+  ])
+
   // 「生成建议」的触发点 = 最近一条客户消息（也是幂等键）
   const reversed = [...customer.messages].reverse()
   const lastCustomerMessage = reversed.find((m) => m.role === 'CUSTOMER') ?? null
@@ -47,35 +52,48 @@ export default async function CustomerWorkbenchPage({
         ← 返回客户列表
       </Link>
 
-      <div className="mt-4 grid gap-6 md:grid-cols-[260px_minmax(0,1fr)_320px]">
-        <aside className="rounded border border-slate-200 bg-white p-4">
-          <h1 className="text-lg font-semibold">{customer.name}</h1>
-          <div className="mt-3 space-y-2 text-sm">
-            <div className="flex items-center gap-2">
-              <span className="text-slate-500">阶段</span>
-              <StageBadge stage={customer.state?.leadStage ?? null} />
+      <div className="mt-4 grid gap-6 md:grid-cols-[280px_minmax(0,1fr)_340px]">
+        <aside className="space-y-4">
+          <div className="rounded border border-slate-200 bg-white p-4">
+            <h1 className="text-lg font-semibold">{customer.name}</h1>
+            <div className="mt-3 space-y-2 text-sm">
+              <div className="flex items-center gap-2">
+                <span className="text-slate-500">阶段</span>
+                <StageBadge stage={customer.state?.leadStage ?? null} />
+              </div>
+              <Row label="最近意图" value={customer.state?.intent ?? '—'} />
+              <div className="flex justify-between">
+                <span className="text-slate-500">是否需要人工</span>
+                <span className={customer.state?.needHuman ? 'font-medium text-red-600' : ''}>
+                  {customer.state?.needHuman ? '是' : '否'}
+                </span>
+              </div>
+              <Row label="状态版本" value={String(customer.state?.version ?? 0)} />
+              <Row
+                label="最后互动"
+                value={formatDateTime(customer.state?.lastActivityAt ?? '—')}
+              />
+              {customer.state?.humanResolvedAt && (
+                <Row
+                  label="解除人工于"
+                  value={formatDateTime(customer.state.humanResolvedAt)}
+                />
+              )}
             </div>
-            <div className="flex justify-between">
-              <span className="text-slate-500">最近意图</span>
-              <span>{customer.state?.intent ?? '—'}</span>
-            </div>
-            <div className="flex justify-between">
-              <span className="text-slate-500">是否需要人工</span>
-              <span className={customer.state?.needHuman ? 'font-medium text-red-600' : ''}>
-                {customer.state?.needHuman ? '是' : '否'}
-              </span>
-            </div>
-            <div className="flex justify-between">
-              <span className="text-slate-500">最后互动</span>
-              <span>{formatDateTime(customer.state?.lastActivityAt ?? '—')}</span>
+
+            <div className="mt-4 border-t border-slate-200 pt-3 text-xs text-slate-500">
+              <div>租户：{tenant.name}</div>
+              <div className="mt-1">渠道：{customer.channel}</div>
+              <div className="mt-1">创建于 {formatDateTime(customer.createdAt)}</div>
+              <div className="mt-1 break-all">客户 ID：{customer.id}</div>
             </div>
           </div>
 
-          <div className="mt-4 border-t border-slate-200 pt-3 text-xs text-slate-500">
-            <div>租户：{tenant.name}</div>
-            <div className="mt-1">渠道：{customer.channel}</div>
-            <div className="mt-1">创建于 {formatDateTime(customer.createdAt)}</div>
-            <div className="mt-1 break-all">客户 ID：{customer.id}</div>
+          <div className="rounded border border-slate-200 bg-white p-4">
+            <h2 className="text-sm font-medium">阶段时间线</h2>
+            <div className="mt-3">
+              <StageTimeline runs={recentRuns} />
+            </div>
           </div>
         </aside>
 
@@ -128,7 +146,15 @@ export default async function CustomerWorkbenchPage({
           />
 
           {latestRun ? (
-            <SuggestionCard run={latestRun} />
+            // key=run.id：换了一条判定就重挂载，编辑框回到新的建议原文
+            <SuggestionCard
+              key={latestRun.id}
+              run={latestRun}
+              tenantId={tenant.id}
+              customerId={customer.id}
+              needHuman={customer.state?.needHuman ?? false}
+              humanReason={customer.state?.humanReason ?? null}
+            />
           ) : (
             <div className="rounded border border-dashed border-slate-300 p-4 text-center text-sm text-slate-500">
               还没有 AI 判定结果。发一条客户消息，或点上面的按钮。
@@ -137,5 +163,14 @@ export default async function CustomerWorkbenchPage({
         </div>
       </div>
     </main>
+  )
+}
+
+function Row({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex justify-between gap-2">
+      <span className="text-slate-500">{label}</span>
+      <span className="text-right">{value}</span>
+    </div>
   )
 }
