@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useRef, useState } from 'react'
+import { useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { randomId } from '@/lib/uuid'
 
@@ -11,8 +11,9 @@ import { randomId } from '@/lib/uuid'
  * 判定由服务端在响应之后按 B 路径跑（3 秒防抖 + 进程内锁）。
  * 所以按钮从"发送中…"到可用只有几百毫秒 —— 用户的发送体验不受模型速度影响。
  *
- * 建议卡片稍后自动出现：这里在发送后做几次有限刷新（不是长轮询），
- * 覆盖"3 秒防抖 + 模型 5~15 秒"这段窗口。想立刻看，也可以点上面的「运行判断」。
+ * 建议卡片怎么自己出现：不在这个组件里做"盲刷"（原来盲刷 4/8/14/20 秒，
+ * 模型慢一点就全错过，看起来像 AI 没反应）。改由右侧的 <AnalysisWatcher />
+ * 盯着"这条消息还没有判定"，一出现结果就自动刷新页面。
  */
 export function MessageComposer({
   tenantId,
@@ -26,14 +27,6 @@ export function MessageComposer({
   const [sending, setSending] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [hint, setHint] = useState<string | null>(null)
-  const timers = useRef<ReturnType<typeof setTimeout>[]>([])
-
-  useEffect(() => {
-    return () => {
-      for (const t of timers.current) clearTimeout(t)
-      timers.current = []
-    }
-  }, [])
 
   async function onSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault()
@@ -59,13 +52,8 @@ export function MessageComposer({
         return
       }
       setContent('')
-      router.refresh() // 消息立刻出现在接诊记录里
-      setHint('消息已发送 · AI 正在后台分析，建议卡片稍后自动出现')
-
-      // 后台判定的典型耗时 = 3 秒防抖 + 模型 5~15 秒；做几次有限刷新覆盖这段窗口
-      for (const delay of [4000, 8000, 14000, 20000]) {
-        timers.current.push(setTimeout(() => router.refresh(), delay))
-      }
+      router.refresh() // 消息立刻出现在接诊记录里；右侧同时出现"AI 正在分析"
+      setHint('消息已发送 · AI 正在自动分析，结果会自己出现在右侧')
     } catch (e) {
       setError(`发送失败：${e instanceof Error ? e.message : String(e)}`)
     } finally {
@@ -74,9 +62,9 @@ export function MessageComposer({
   }
 
   return (
-    <form onSubmit={onSubmit} className="mt-4 border-t border-slate-200 pt-4">
+    <form onSubmit={onSubmit} className="border-t border-slate-200 bg-white px-4 py-3">
       <textarea
-        className="w-full rounded border border-slate-300 bg-white px-3 py-2 text-sm"
+        className="w-full resize-none rounded border border-slate-300 bg-white px-3 py-2 text-sm transition-shadow focus:border-blue-400 focus:ring-2 focus:ring-blue-100 focus:outline-none"
         rows={2}
         placeholder="输入一条客户消息，例如：那你们多少钱？"
         value={content}
@@ -86,7 +74,7 @@ export function MessageComposer({
         <button
           type="submit"
           disabled={sending}
-          className="rounded bg-slate-900 px-3 py-1.5 text-sm text-white disabled:opacity-50"
+          className="rounded bg-blue-600 px-3 py-1.5 text-sm font-medium text-white transition-colors hover:bg-blue-700 disabled:opacity-50"
         >
           {sending ? '发送中…' : '以客户身份发送'}
         </button>

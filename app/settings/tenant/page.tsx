@@ -1,17 +1,22 @@
 import Link from 'next/link'
 import { notFound } from 'next/navigation'
+import { AppHeader } from '@/components/AppHeader'
+import { LogoutButton } from '@/components/LogoutButton'
 import { TenantConfigForm } from '@/components/TenantConfigForm'
 import { TenantSwitcher } from '@/components/TenantSwitcher'
-import { getTenantDetail } from '@/server/services/tenant.service'
-import { listTenants } from '@/server/services/tenant.service'
+import { getTenantDetail, listTenants } from '@/server/services/tenant.service'
 
 export const dynamic = 'force-dynamic'
 
-/**
- * 租户配置页（技术栈文档 §5.2 / 配置改造.md §5）。
- *
- * 配置是**每次判定现读**的 —— 这里改完，下一次 AI 判定立刻用新配置，不需要重启、不需要重新部署。
- */
+const HEADER_ACTION =
+  'rounded border border-slate-300 bg-white px-3 py-1.5 text-xs text-slate-700 transition-colors hover:bg-slate-100'
+
+//
+// 用户配置页（租户配置）。
+//
+// 只做排版优化：把"页面标题 + 一句话说明 + 租户切换"收成一条清楚的页头，
+// 表单交给下面的大留白区域。配置是**每次判定现读**的 —— 改完保存，下一次 AI 判定立刻生效。
+//
 export default async function TenantSettingsPage({
   searchParams,
 }: {
@@ -26,29 +31,29 @@ export default async function TenantSettingsPage({
   if (!detail) notFound()
 
   return (
-    <main className="mx-auto max-w-3xl px-6 py-10">
-      <Link
-        href={`/customers?tenantId=${current.id}`}
-        className="text-sm text-blue-600 hover:underline"
-      >
-        ← 返回客户列表
-      </Link>
+    <div className="flex min-h-screen flex-col bg-slate-50">
+      <AppHeader subtitle="用户配置">
+        <TenantSwitcher tenants={tenants} currentTenantId={current.id} basePath="/settings/tenant" />
+        <Link href={`/customers?tenantId=${current.id}`} className={HEADER_ACTION}>
+          ← 客户列表
+        </Link>
+        <LogoutButton />
+      </AppHeader>
 
-      <div className="mt-4 flex flex-wrap items-end justify-between gap-4">
-        <div>
-          <h1 className="text-xl font-semibold">租户配置</h1>
-          <p className="mt-1 text-xs text-slate-500">
-            改完保存即刻生效 —— 下一次 AI 判定就会用新配置（不需要重启或重新部署）。
-          </p>
+      <main className="mx-auto w-full max-w-[1000px] flex-1 px-6 py-8">
+        <div className="flex flex-wrap items-baseline justify-between gap-x-6 gap-y-1">
+          <h1 className="text-lg font-semibold tracking-tight">用户配置</h1>
+          <p className="text-xs text-slate-500">当前租户：{current.name}</p>
         </div>
-        <TenantSwitcher
-          tenants={tenants}
-          currentTenantId={current.id}
-          basePath="/settings/tenant"
-        />
-      </div>
+        <p className="mt-2 max-w-[70ch] text-sm leading-relaxed text-slate-600">
+          改完保存即刻生效，不需要重启或重新部署 —— 下一次 AI 判定就会用新配置。
+          规则、阶段语义、转人工条件、产品与报价都按租户隔离，互不影响。
+        </p>
 
-      <TenantConfigForm tenant={detail} />
-    </main>
+        <div className="mt-6">
+          <TenantConfigForm tenant={detail} />
+        </div>
+      </main>
+    </div>
   )
 }

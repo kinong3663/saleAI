@@ -135,7 +135,7 @@ export function SuggestionCard({
   }
 
   return (
-    <section className="rounded border border-slate-200 bg-white p-4">
+    <section className="rounded-lg border border-slate-200 bg-white p-4">
       <div className="flex items-center justify-between">
         <h2 className="font-medium">AI 建议</h2>
         <span

@@ -1,11 +1,11 @@
 'use client'
 
-import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import type { TenantDTO } from '@/lib/types'
 
-// 顶部的租户选择。basePath 决定切换后跳回哪个页面（客户列表 / 租户配置）。
-// 旁边那个「租户配置」入口是配置页的发现路径 —— 文档里它是个独立路由，得有地方点进去。
+// 顶部的租户选择。basePath 决定切换后跳回哪个页面（客户列表 / 用户配置）。
+// 「用户配置」入口不在这里 —— 它由各页面顶栏放在这个选择器右边（AppHeader 的动作插槽），
+// 这样两个页面长得一样，也不会出现两个入口互相打架。
 export function TenantSwitcher({
   tenants,
   currentTenantId,
@@ -27,7 +27,7 @@ export function TenantSwitcher({
         id={id}
         value={currentTenantId}
         onChange={(e) => router.push(`${basePath}?tenantId=${e.target.value}`)}
-        className="rounded border border-slate-300 bg-white px-2 py-1 text-sm"
+        className="rounded border border-slate-300 bg-white px-2 py-1.5 text-xs text-slate-700 transition-colors hover:bg-slate-100"
       >
         {tenants.map((t) => (
           <option key={t.id} value={t.id}>
@@ -35,12 +35,6 @@ export function TenantSwitcher({
           </option>
         ))}
       </select>
-      <Link
-        href={`/settings/tenant?tenantId=${currentTenantId}`}
-        className="text-xs text-blue-600 hover:underline"
-      >
-        租户配置
-      </Link>
     </div>
   )
 }

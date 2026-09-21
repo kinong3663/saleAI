@@ -3,10 +3,13 @@
 import { useState } from 'react'
 import { useRouter } from 'next/navigation'
 
-/**
- * 触发 AI 判定的按钮。
- * 幂等由后端保证：同一条消息重复判定，返回的是同一条 AgentRun。
- */
+//
+// 手动重试按钮 —— **不是**正常路径。
+//
+// 正常路径是：客户消息落库 → 服务端在响应之后自动判定（docs/消息触发时序.md）。
+// 这个按钮只用于两种兜底：模型超时/失败后重试，或对旧消息重新判定。
+// 幂等由后端保证：同一条消息重复判定，返回的是同一条 AgentRun。
+//
 export function AnalyzePanel({
   tenantId,
   customerId,
@@ -52,15 +55,18 @@ export function AnalyzePanel({
   }
 
   return (
-    <div className="rounded border border-slate-200 bg-white p-3">
+    <div className="rounded-lg border border-slate-200 bg-white p-3">
       <button
         type="button"
         onClick={onRun}
         disabled={pending || !triggerMessageId}
-        className="w-full rounded bg-slate-900 px-3 py-1.5 text-sm text-white disabled:opacity-40"
+        className="w-full rounded border border-slate-300 bg-white px-3 py-1.5 text-xs text-slate-700 transition-colors hover:bg-slate-100 disabled:opacity-40"
       >
-        {pending ? 'AI 判定中…' : '生成 / 重新生成建议'}
+        {pending ? 'AI 判定中…' : '手动重新判定'}
       </button>
+      <p className="mt-2 text-xs text-slate-400">
+        正常情况下不用点：客户一发消息，系统会自动判定（约 10~20 秒出结果，右侧会显示进度）。
+      </p>
       {!triggerMessageId && (
         <p className="mt-2 text-xs text-slate-400">先发一条客户消息，才能触发判定。</p>
       )}
