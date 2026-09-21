@@ -1,5 +1,5 @@
 import { prisma } from '@/server/db'
-import type { TenantDTO } from '@/lib/types'
+import type { TenantConfig, TenantDTO, TenantForAgent } from '@/lib/types'
 
 /**
  * 租户目录。
@@ -20,4 +20,39 @@ export async function getTenant(tenantId: string): Promise<TenantDTO | null> {
     where: { id: tenantId },
     select: { id: true, slug: true, name: true },
   })
+}
+
+/**
+ * agent pipeline 用的租户视图：名字 + 目标 + 语气 + 全部 config。
+ *
+ * config 是 JSONB，这里补默认值再往下传 —— 演示时会现场改规则，
+ * 少一个字段不该让整条链路 500。
+ */
+export async function getTenantForAgent(tenantId: string): Promise<TenantForAgent | null> {
+  const row = await prisma.tenant.findUnique({
+    where: { id: tenantId },
+    select: { id: true, name: true, salesGoal: true, tone: true, config: true },
+  })
+  if (!row) return null
+
+  const raw = (row.config ?? {}) as Partial<TenantConfig>
+  const config: TenantConfig = {
+    rules: raw.rules ?? [],
+    stageDefs: raw.stageDefs ?? {},
+    needHumanTriggers: raw.needHumanTriggers ?? [],
+    replyTone: raw.replyTone,
+    priceFallbackReply:
+      raw.priceFallbackReply ?? '这个问题我需要请同事帮你确认一下，稍等我回复你～',
+    followUpAfterHours: raw.followUpAfterHours ?? 24,
+    maxFollowUps: raw.maxFollowUps ?? 2,
+    products: raw.products ?? [],
+  }
+
+  return {
+    id: row.id,
+    name: row.name,
+    salesGoal: row.salesGoal,
+    tone: row.tone,
+    config,
+  }
 }

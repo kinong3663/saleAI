@@ -56,21 +56,30 @@ export async function createCustomer(
 }
 
 /**
- * 客户详情 + 会话记录。
+ * 只取客户 + 状态，不带消息体 —— agent pipeline 走这条（它自己按 HISTORY_LIMIT 取历史）。
  *
- * `where` 里同时带 id 和 tenantId —— 拿租户 A 的 tenantId 查租户 B 的 customerId
+ * `where` 里同时带 id 和 tenantId：拿租户 A 的 tenantId 查租户 B 的 customerId
  * 会返回 null，路由层转成 404（进阶挑战 4 的验收点）。
  */
-export async function getCustomer(
+export async function getCustomerState(
   tenantId: string,
   customerId: string,
-): Promise<CustomerDetail | null> {
+): Promise<CustomerSummary | null> {
   const row = await prisma.customer.findFirst({
     where: { id: customerId, tenantId, archivedAt: null },
     include: { state: true },
   })
-  if (!row) return null
+  return row ? toSummary(row) : null
+}
+
+/** 客户详情 + 会话记录 */
+export async function getCustomer(
+  tenantId: string,
+  customerId: string,
+): Promise<CustomerDetail | null> {
+  const summary = await getCustomerState(tenantId, customerId)
+  if (!summary) return null
 
   const messages = await listMessages(tenantId, customerId)
-  return { ...toSummary(row), messages }
+  return { ...summary, messages }
 }

@@ -5,6 +5,8 @@ import { useRouter } from 'next/navigation'
 
 /**
  * 「新增客户消息」输入框 —— Demo 的主入口。
+ *
+ * 两件事连在一起：写消息 → 触发 AI 判定 → 刷新页面。
  * 每条消息带一个 clientMsgId：真实场景里网络重试/用户连点不该写成两条记录，
  * 兜底靠的是 messages(customerId, clientMsgId) 的唯一约束。
  */
@@ -17,16 +19,18 @@ export function MessageComposer({
 }) {
   const router = useRouter()
   const [content, setContent] = useState('')
-  const [pending, setPending] = useState(false)
+  const [phase, setPhase] = useState<'idle' | 'sending' | 'analyzing'>('idle')
   const [error, setError] = useState<string | null>(null)
+
+  const pending = phase !== 'idle'
 
   async function onSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault()
     const text = content.trim()
     if (!text || pending) return
 
-    setPending(true)
     setError(null)
+    setPhase('sending')
     try {
       const res = await fetch(`/api/customers/${customerId}/messages`, {
         method: 'POST',
@@ -42,12 +46,24 @@ export function MessageComposer({
         setError(`发送失败（HTTP ${res.status}）`)
         return
       }
+      const data = (await res.json()) as { message: { id: string } }
       setContent('')
+
+      // 消息落库之后紧接着触发判定（AI 调用在后端，不在数据库事务里）
+      setPhase('analyzing')
+      const analyzeRes = await fetch(`/api/customers/${customerId}/analyze`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ tenantId, triggerMessageId: data.message.id }),
+      })
+      if (!analyzeRes.ok) {
+        setError(`消息已保存，但 AI 判定失败（HTTP ${analyzeRes.status}）`)
+      }
       router.refresh()
     } catch {
       setError('网络错误，请重试')
     } finally {
-      setPending(false)
+      setPhase('idle')
     }
   }
 
@@ -66,7 +82,11 @@ export function MessageComposer({
           disabled={pending}
           className="rounded bg-slate-900 px-3 py-1.5 text-sm text-white disabled:opacity-50"
         >
-          {pending ? '发送中…' : '以客户身份发送'}
+          {phase === 'sending'
+            ? '发送中…'
+            : phase === 'analyzing'
+              ? 'AI 判定中…'
+              : '以客户身份发送'}
         </button>
         {error && <span className="text-sm text-red-600">{error}</span>}
       </div>
