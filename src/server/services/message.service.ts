@@ -22,6 +22,15 @@ function toDTO(row: MessageRow): MessageDTO {
   }
 }
 
+/** clientMsgId 撞唯一约束 = 这条消息已经写过了（前端重试、双击） */
+function isDuplicateClientMsgId(e: unknown, clientMsgId?: string | null): boolean {
+  return (
+    clientMsgId != null &&
+    e instanceof Prisma.PrismaClientKnownRequestError &&
+    e.code === 'P2002'
+  )
+}
+
 /**
  * 取最近 N 条，返回时是时间正序。
  *
@@ -44,7 +53,7 @@ export async function listMessages(
 }
 
 /**
- * 写入一条消息。
+ * 写入一条消息（CUSTOMER / SYSTEM 用；SALES 请走 sendSalesReply）。
  *
  * 两件必须做的事：
  * ① 先确认 customerId 属于这个 tenantId —— 否则「用租户 A 的身份给租户 B 的客户发消息」就成了越权写入
@@ -84,11 +93,7 @@ export async function appendMessage(
     })
     return toDTO(created)
   } catch (e) {
-    const duplicated =
-      input.clientMsgId != null &&
-      e instanceof Prisma.PrismaClientKnownRequestError &&
-      e.code === 'P2002'
-    if (duplicated) {
+    if (isDuplicateClientMsgId(e, input.clientMsgId)) {
       const existing = await prisma.message.findFirst({
         where: { customerId, clientMsgId: input.clientMsgId },
       })
@@ -109,10 +114,13 @@ export interface SendSalesReplyResult {
   message: MessageDTO
   source: string
   suggestionEdited: boolean
+  /** true 表示这次是重复提交，返回的是已存在的那条（没有二次改状态） */
+  duplicated: boolean
 }
 
 /**
- * 销售确认发送（S5 关键点）。
+ * 销售发送（S5 关键点）—— **这是写 SALES 消息的唯一入口**。
+ * 通用 messages 接口收到 role=SALES 时也必须转到这里，否则会绕过下面这个事务：
  *
  * 一个事务里做四件事：
  *   ① 写 SALES 消息  ② 更新 lastSalesMessageAt / lastActivityAt  ③ 回填 suggestionSent / suggestionEdited
@@ -121,6 +129,8 @@ export interface SendSalesReplyResult {
  * source 的取值：带了 runId 就是 ai_suggested（哪怕销售改过字），否则是 manual。
  * 「改过没有」不靠前端声明，而是拿 sent 的内容和 AgentRun.output.reply 比 —— 前端可以撒谎，
  * 数据库里的两份内容不会。
+ *
+ * clientMsgId 撞唯一约束 → 返回已存在的那条（前端重试/双击不该写成两条，也不该报 500）。
  */
 export async function sendSalesReply(
   tenantId: string,
@@ -143,32 +153,54 @@ export async function sendSalesReply(
 
   const suggestedReply = ((run?.output ?? null) as AgentOutput | null)?.reply ?? null
   const source = run ? 'ai_suggested' : 'manual'
-  const suggestionEdited =
-    suggestedReply !== null && suggestedReply.trim() !== input.content.trim()
+  const editedComparedTo = (content: string) =>
+    suggestedReply !== null && suggestedReply.trim() !== content.trim()
   const at = new Date()
 
-  const created = await prisma.$transaction(async (tx) => {
-    const row = await tx.message.create({
-      data: {
-        tenantId,
-        customerId,
-        role: 'SALES',
-        content: input.content,
-        source,
-        clientMsgId: input.clientMsgId ?? null,
-        createdAt: at,
-      },
-    })
-    await markSalesReplySent(tenantId, customerId, at, tx)
-    if (run) {
-      await tx.agentRun.update({
-        where: { id: run.id },
-        data: { suggestionSent: true, suggestionEdited },
+  try {
+    const created = await prisma.$transaction(async (tx) => {
+      const row = await tx.message.create({
+        data: {
+          tenantId,
+          customerId,
+          role: 'SALES',
+          content: input.content,
+          source,
+          clientMsgId: input.clientMsgId ?? null,
+          createdAt: at,
+        },
       })
+      await markSalesReplySent(tenantId, customerId, at, tx)
+      if (run) {
+        await tx.agentRun.update({
+          where: { id: run.id },
+          data: { suggestionSent: true, suggestionEdited: editedComparedTo(input.content) },
+        })
+      }
+      await tx.customer.update({ where: { id: customerId }, data: { updatedAt: at } })
+      return row
+    })
+    return {
+      message: toDTO(created),
+      source,
+      suggestionEdited: editedComparedTo(input.content),
+      duplicated: false,
     }
-    await tx.customer.update({ where: { id: customerId }, data: { updatedAt: at } })
-    return row
-  })
-
-  return { message: toDTO(created), source, suggestionEdited }
+  } catch (e) {
+    // 重复提交：事务已整体回滚（状态没被改第二次），返回已存在的那条
+    if (isDuplicateClientMsgId(e, input.clientMsgId)) {
+      const existing = await prisma.message.findFirst({
+        where: { customerId, clientMsgId: input.clientMsgId },
+      })
+      if (existing) {
+        return {
+          message: toDTO(existing),
+          source: existing.source,
+          suggestionEdited: editedComparedTo(existing.content),
+          duplicated: true,
+        }
+      }
+    }
+    throw e
+  }
 }

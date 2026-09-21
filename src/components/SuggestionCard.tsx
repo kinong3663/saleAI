@@ -4,6 +4,7 @@ import { useState } from 'react'
 import { useRouter } from 'next/navigation'
 import type { AgentRunDTO } from '@/lib/types'
 import { formatDateTime } from '@/lib/datetime'
+import { randomId } from '@/lib/uuid'
 import { StageBadge } from './StageBadge'
 
 const STATUS_STYLE: Record<string, string> = {
@@ -27,6 +28,10 @@ const ISSUE_LABEL: Record<string, string> = {
  *
  * 编辑后发送仍然记 source = ai_suggested；「改没改过」由后端拿内容和
  * AgentRun.output.reply 比出来（前端说了不算）。
+ *
+ * clientMsgId 每次「发送尝试」用同一个 id：双击或网络重试不会写成两条 SALES 消息
+ * （服务端靠 messages(customerId, clientMsgId) 唯一约束兜底）。发送成功后换新 id，
+ * 下一次发送才是另一条消息。
  */
 export function SuggestionCard({
   run,
@@ -43,6 +48,7 @@ export function SuggestionCard({
 }) {
   const router = useRouter()
   const [draft, setDraft] = useState(run.output?.reply ?? '')
+  const [sendId, setSendId] = useState(() => randomId())
   const [phase, setPhase] = useState<'idle' | 'sending' | 'resolving'>('idle')
   const [error, setError] = useState<string | null>(null)
   const [note, setNote] = useState<string | null>(null)
@@ -61,7 +67,12 @@ export function SuggestionCard({
       const res = await fetch(`/api/customers/${customerId}/reply`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ tenantId, content: draft.trim(), runId: run.id }),
+        body: JSON.stringify({
+          tenantId,
+          content: draft.trim(),
+          runId: run.id,
+          clientMsgId: sendId,
+        }),
       })
       const data = (await res.json().catch(() => null)) as {
         source?: string
@@ -71,12 +82,13 @@ export function SuggestionCard({
         setError(`发送失败（HTTP ${res.status}）`)
         return
       }
+      setSendId(randomId())
       setNote(
-        `已发送（source=${data?.source ?? 'ai_suggested'}，${data?.suggestionEdited ? '内容有编辑' : '原文未改'}）`,
+        `已发送 · 记录来源 ${data?.source ?? 'ai_suggested'}${data?.suggestionEdited ? ' · 内容有编辑' : ' · 原文未改'}`,
       )
       router.refresh()
-    } catch {
-      setError('网络错误，请重试')
+    } catch (e) {
+      setError(`发送失败：${e instanceof Error ? e.message : String(e)}`)
     } finally {
       setPhase('idle')
     }
@@ -96,10 +108,10 @@ export function SuggestionCard({
         setError(`解除人工失败（HTTP ${res.status}）`)
         return
       }
-      setNote('已解除人工（写入了 humanResolvedAt）')
+      setNote('已解除人工 · 已写入 humanResolvedAt')
       router.refresh()
-    } catch {
-      setError('网络错误，请重试')
+    } catch (e) {
+      setError(`解除人工失败：${e instanceof Error ? e.message : String(e)}`)
     } finally {
       setPhase('idle')
     }
