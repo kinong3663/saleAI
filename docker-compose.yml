@@ -4,12 +4,13 @@
 #   · postgres 有 healthcheck，app 用 depends_on: condition: service_healthy（否则启动顺序会打架）
 #   · postgres 不映射端口 —— 5432 不对公网开放，只在 compose 内网可达
 #   · 所有环境变量通过这里注入，镜像里不含任何 key
+#   · 宿主端口用 APP_PORT 覆盖：本地/默认 80，服务器上 80 被别的站点占用时写 APP_PORT=8080
 services:
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
     environment:
-      POSTGRES_PASSWORD: ${PG_PASSWORD:?请在服务器上的 .env 里设置 PG_PASSWORD}
+      POSTGRES_PASSWORD: ${PG_PASSWORD:?请在 .env 里设置 PG_PASSWORD}
       POSTGRES_DB: zigoai
     volumes:
       - pgdata:/var/lib/postgresql/data
@@ -23,10 +24,10 @@ services:
     build: .
     restart: unless-stopped
     ports:
-      - "80:3000"
+      - "${APP_PORT:-80}:3000"
     environment:
       DATABASE_URL: postgresql://postgres:${PG_PASSWORD}@postgres:5432/zigoai?schema=public
-      LLM_API_KEY: ${LLM_API_KEY:?请在服务器上的 .env 里设置 LLM_API_KEY}
+      LLM_API_KEY: ${LLM_API_KEY:?请在 .env 里设置 LLM_API_KEY}
       LLM_BASE_URL: ${LLM_BASE_URL:-https://api.deepseek.com}
       LLM_MODEL: ${LLM_MODEL:-deepseek-flash}
       APP_PASSWORD: ${APP_PASSWORD:-}
