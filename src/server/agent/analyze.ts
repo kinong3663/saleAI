@@ -7,6 +7,7 @@ import { getCustomerState } from '@/server/services/customer.service'
 import { listMessages } from '@/server/services/message.service'
 import { applyAnalysisToState, type StateDb } from '@/server/services/state.service'
 import { getTenantForAgent } from '@/server/services/tenant.service'
+import { buildFallbackOutput } from './fallback'
 import {
   applyGuardrails,
   buildCorrectionSuffix,
@@ -23,12 +24,24 @@ import { parseAgentOutput, type AgentOutput, type AgentOutputLoose } from './sch
  *
  * 一条客户消息进来之后发生了什么：
  *   幂等检查 → 读租户配置 + 客户状态 + 最近 HISTORY_LIMIT 条历史 → 渲染 prompt
- *   → 调 LLM（**不在事务里**）→ Zod 校验 → 护栏裁决 →（必要时）带约束重生成一次
- *   → 一个事务里落 AgentRun + 更新 CustomerState
+ *   → 调 LLM（**不在事务里**）→ Zod 校验（失败则带强约束重试一次）
+ *   → 护栏裁决 →（必要时）带约束重生成一次 → 一个事务里落 AgentRun + 更新 CustomerState
+ *
+ * S7：任何一步拿不到可用输出，都走**降级**而不是抛错 ——
+ * 产出一张「AI 暂不可用，已转人工」的卡片，状态不前进，AgentRun.status = FALLBACK。
  *
  * 状态迁移只由 trigger = CUSTOMER_MESSAGE 驱动（决策 Q13），
  * 收紧点在 state.service.applyAnalysisToState 里，不在这个文件。
  */
+
+/** 解析失败后的重试提示（实施文档 S7：非法 JSON / 字段缺失 都重试一次） */
+const JSON_REPAIR_SUFFIX = [
+  '',
+  '## 追加约束（触发于解析失败）',
+  '你上一次的回复不是合法 JSON，或者缺少必需字段。',
+  '请只输出一个 JSON 对象：不要 markdown 代码块、不要任何解释文字、不要多余字段，',
+  '并且必须包含全部字段：customer_intent / lead_stage / next_action / reply / reason / need_human / rules_hit / confidence。',
+].join('\n')
 
 export interface AnalyzeInput {
   trigger: Trigger
@@ -40,6 +53,8 @@ export interface AnalyzeResult {
   reused: boolean
   run: AgentRunDTO
   reason?: string
+  /** true = 本次是降级产出（AgentRun.status = FALLBACK） */
+  fallback?: boolean
 }
 
 export async function analyzeCustomerMessage(
@@ -76,11 +91,12 @@ export async function analyzeCustomerMessage(
   }))
 
   const prevStage = (customer.state?.leadStage ?? 'NEW') as LeadStage
+  const prevIntent = customer.state?.intent ?? null
   const system = buildSystemPrompt(tenant, input.trigger)
   const user = buildUserPrompt({
     state: {
       leadStage: prevStage,
-      intent: customer.state?.intent ?? null,
+      intent: prevIntent,
       needHuman: customer.state?.needHuman ?? false,
       lastActivityAt: customer.state?.lastActivityAt
         ? new Date(customer.state.lastActivityAt)
@@ -92,6 +108,7 @@ export async function analyzeCustomerMessage(
   const inputDigest = {
     trigger: input.trigger,
     prevStage,
+    prevIntent,
     prevNeedHuman: customer.state?.needHuman ?? false,
     historyCount: history.length,
     strictUnsupported: isStrictUnsupported(),
@@ -112,56 +129,70 @@ export async function analyzeCustomerMessage(
 
   // ── 调模型：绝不在数据库事务里（技术栈文档第 9 节） ──
   const llm = await callLLM(system, user)
-  if (!llm.ok) {
-    const run = await saveRun({
-      tenantId,
-      customerId,
-      triggerMessageId: input.triggerMessageId,
-      status: 'FAILED',
-      latencyMs: llm.latencyMs,
-      attempt: llm.attempt,
-      inputDigest,
-      rawOutput: null,
-      output: null,
-      rulesHit: [],
-      guardrailIssues: [],
-      error: llm.error,
-    })
-    return { ok: false, reused: false, run, reason: llm.error }
+  let rawOutput: string | null = llm.ok ? llm.raw : null
+  let attempt = llm.attempt
+  let latencyMs = llm.latencyMs
+  let failure: string | null = null
+  let parsed: AgentOutputLoose | null = null
+
+  if (llm.ok) {
+    const first = parseOrNull(llm.raw)
+    parsed = first.value
+    failure = first.error
+  } else {
+    failure = llm.error
   }
 
-  // ── Zod 校验（护栏之前） ──
-  let parsed: AgentOutputLoose
-  try {
-    parsed = parseAgentOutput(llm.raw)
-  } catch (e) {
+  // 非法 JSON / 字段缺失 / 类型错 → 带强约束重试一次
+  if (llm.ok && parsed === null) {
+    const repair = await callLLM(system + JSON_REPAIR_SUFFIX, user)
+    attempt += repair.attempt
+    latencyMs += repair.latencyMs
+    if (repair.ok) {
+      rawOutput = repair.raw
+      const second = parseOrNull(repair.raw)
+      parsed = second.value
+      failure = second.error
+    }
+    if (parsed === null && !failure) failure = 'invalid_output'
+  }
+
+  // ── 拿不到可用输出 → 降级（不抛错、不红屏） ──
+  if (parsed === null) {
+    const error = failure ?? 'unknown_error'
+    const output = buildFallbackOutput({ prevStage, prevIntent, error })
+    const at = new Date()
     const run = await saveRun({
       tenantId,
       customerId,
       triggerMessageId: input.triggerMessageId,
-      status: 'FAILED',
-      latencyMs: llm.latencyMs,
-      attempt: llm.attempt,
+      status: 'FALLBACK',
+      latencyMs,
+      attempt,
       inputDigest,
-      rawOutput: llm.raw,
-      output: null,
+      rawOutput,
+      output,
       rulesHit: [],
       guardrailIssues: [],
-      error: `invalid_output: ${e instanceof Error ? e.message : String(e)}`,
+      error,
+      applyState: (db: StateDb) =>
+        applyAnalysisToState(
+          tenantId,
+          customerId,
+          { trigger: input.trigger, output, at, fallback: true },
+          db,
+        ),
     })
-    return { ok: false, reused: false, run, reason: 'invalid_output' }
+    return { ok: false, reused: false, run, reason: error, fallback: true }
   }
 
   // ── 护栏：模型输出不是最终结果，护栏之后的才是 ──
-  const first = applyGuardrails(parsed, guardrailContext)
-  let output: AgentOutputLoose = first.output
-  let issues: GuardrailIssue[] = first.issues
-  let rawOutput = llm.raw
-  let attempt = llm.attempt
-  let latencyMs = llm.latencyMs
+  const guard1 = applyGuardrails(parsed, guardrailContext)
+  let output: AgentOutputLoose = guard1.output
+  let issues: GuardrailIssue[] = guard1.issues
   let status: 'SUCCESS' | 'REPAIRED' = 'SUCCESS'
 
-  if (first.needsRegen) {
+  if (guard1.needsRegen) {
     // 只重生成一次；第二次仍违规就换租户配置的兜底话术（S4 关键点）
     status = 'REPAIRED'
     const retry = await callLLM(system + buildCorrectionSuffix(tenant.config.rules, issues), user)
@@ -171,11 +202,8 @@ export async function analyzeCustomerMessage(
     let second: GuardrailResult | null = null
     if (retry.ok) {
       rawOutput = retry.raw
-      try {
-        second = applyGuardrails(parseAgentOutput(retry.raw), guardrailContext)
-      } catch {
-        second = null // 第二次连 JSON 都不合法 → 走兜底话术
-      }
+      const reparsed = parseOrNull(retry.raw).value
+      if (reparsed) second = applyGuardrails(reparsed, guardrailContext)
     }
 
     if (second) {
@@ -186,7 +214,7 @@ export async function analyzeCustomerMessage(
         second.needsRegen = false
       }
     } else {
-      output = { ...first.output, reply: tenant.config.priceFallbackReply }
+      output = { ...guard1.output, reply: tenant.config.priceFallbackReply }
     }
   }
 
@@ -247,6 +275,16 @@ export async function getRecentAgentRuns(
 
 type AgentRunRow = Prisma.AgentRunGetPayload<Record<string, never>>
 
+/** 解析失败不抛异常，把原因（截断）带回去 —— 上层决定重试还是降级 */
+function parseOrNull(raw: string): { value: AgentOutputLoose | null; error: string | null } {
+  try {
+    return { value: parseAgentOutput(raw), error: null }
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e)
+    return { value: null, error: `invalid_output: ${message.slice(0, 200)}` }
+  }
+}
+
 interface SaveRunInput {
   tenantId: string
   customerId: string
@@ -260,7 +298,7 @@ interface SaveRunInput {
   rulesHit: string[]
   guardrailIssues: string[]
   error: string | null
-  /** 与 AgentRun 同事务执行的状态更新；失败路径不传（状态不前进） */
+  /** 与 AgentRun 同事务执行的状态更新 */
   applyState?: (db: StateDb) => Promise<void>
 }
 

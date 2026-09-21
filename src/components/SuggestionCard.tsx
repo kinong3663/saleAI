@@ -10,7 +10,7 @@ import { StageBadge } from './StageBadge'
 const STATUS_STYLE: Record<string, string> = {
   SUCCESS: 'bg-emerald-100 text-emerald-700',
   REPAIRED: 'bg-amber-100 text-amber-800',
-  FALLBACK: 'bg-red-100 text-red-700',
+  FALLBACK: 'bg-amber-100 text-amber-800',
   FAILED: 'bg-red-100 text-red-700',
 }
 
@@ -24,6 +24,21 @@ const ISSUE_LABEL: Record<string, string> = {
 }
 
 /**
+ * 把 AgentRun.error 翻成人话（降级提示用）。
+ * 放在客户端这一侧，避免把 src/server/agent/ 拖进浏览器 bundle。
+ */
+function humanizeRunError(error: string): string {
+  if (error.startsWith('timeout_after_')) return '模型响应超时'
+  if (error.startsWith('network_error')) return '网络不通'
+  if (error === 'empty_completion') return '模型返回了空内容'
+  if (error.startsWith('invalid_output')) return '模型返回的内容不符合约定格式'
+  if (error.startsWith('http_')) return `模型服务报错（${error.slice(0, 16)}）`
+  if (error.startsWith('forced_failure')) return '演示用的强制故障开关已打开'
+  if (error === 'missing_llm_api_key') return '没有配置模型密钥'
+  return error
+}
+
+/**
  * AI 建议卡片：判断结果 + **可编辑的建议回复** + 发送 + 解除人工。
  *
  * 编辑后发送仍然记 source = ai_suggested；「改没改过」由后端拿内容和
@@ -32,6 +47,8 @@ const ISSUE_LABEL: Record<string, string> = {
  * clientMsgId 每次「发送尝试」用同一个 id：双击或网络重试不会写成两条 SALES 消息
  * （服务端靠 messages(customerId, clientMsgId) 唯一约束兜底）。发送成功后换新 id，
  * 下一次发送才是另一条消息。
+ *
+ * status = FALLBACK 时（S7 降级）这里显示「AI 暂不可用，已转人工」，而不是报错红屏。
  */
 export function SuggestionCard({
   run,
@@ -129,6 +146,18 @@ export function SuggestionCard({
           {run.status}
         </span>
       </div>
+
+      {/* S7：降级时的提示 —— 不是报错红屏 */}
+      {run.status === 'FALLBACK' && (
+        <div className="mt-3 rounded border border-amber-300 bg-amber-50 p-3">
+          <p className="text-sm font-medium text-amber-900">
+            AI 暂不可用，已转人工（这一轮不推进阶段与意图）
+          </p>
+          {run.error && (
+            <p className="mt-1 text-xs text-amber-900/80">原因：{humanizeRunError(run.error)}</p>
+          )}
+        </div>
+      )}
 
       {needHuman && (
         <div className="mt-3 rounded border border-red-200 bg-red-50 p-3">

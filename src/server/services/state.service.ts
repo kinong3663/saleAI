@@ -7,10 +7,11 @@ import type { Trigger } from '@/lib/constants'
 /**
  * CustomerState 的唯一写入方。
  *
- * 三条不能违反的语义：
+ * 四条不能违反的语义：
  * ① needHuman 是**棘轮**：prev.needHuman || 本次判断，AI 无权撤销（决策 Q4）
- * ② 状态迁移只由客户的新输入驱动（决策 Q13）—— 跟进是我们主动说话，客户没提供新信息
- * ③ 每次状态变更 version +1
+ * ② 状态迁移（leadStage / intent）只由客户的新输入驱动（决策 Q13）
+ * ③ 降级（fallback）时**状态不前进**：只动 needHuman 与时间戳（实施文档 S7）
+ * ④ 每次状态变更 version +1
  */
 
 /** 允许传入事务客户端，让「写状态」和同一次判定产生的 AgentRun 落在同一个事务里 */
@@ -22,6 +23,8 @@ export interface AnalysisStateInput {
   output: AgentOutputLoose
   /** 触发这次判定的时间，用于 lastCustomerMessageAt / lastActivityAt */
   at: Date
+  /** true = 这次是 AI 降级路径：不推进阶段与意图 */
+  fallback?: boolean
 }
 
 export async function applyAnalysisToState(
@@ -32,8 +35,11 @@ export async function applyAnalysisToState(
 ): Promise<void> {
   const current = await db.customerState.findUnique({ where: { customerId } })
 
-  // 决策 Q13：只有「客户发来新消息」才允许推进阶段 / 改意图
-  const canAdvance = input.trigger === 'CUSTOMER_MESSAGE'
+  // 触发源是不是「客户发来新消息」：决定要不要更新客户侧的时间戳
+  const isCustomerMessage = input.trigger === 'CUSTOMER_MESSAGE'
+  // 决策 Q13 + S7：只有客户新消息能推进阶段/意图，且降级时不推进
+  const canAdvance = isCustomerMessage && !input.fallback
+
   const leadStage = canAdvance
     ? input.output.lead_stage
     : (current?.leadStage ?? input.output.lead_stage)
@@ -43,7 +49,7 @@ export async function applyAnalysisToState(
   const needHuman = (current?.needHuman ?? false) || input.output.need_human
 
   const lastActivityAt = maxDate(current?.lastActivityAt ?? null, input.at)
-  const lastCustomerMessageAt = canAdvance
+  const lastCustomerMessageAt = isCustomerMessage
     ? maxDate(current?.lastCustomerMessageAt ?? null, input.at)
     : (current?.lastCustomerMessageAt ?? null)
 
