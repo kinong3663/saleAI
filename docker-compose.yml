@@ -1,0 +1,23 @@
+# S1：本地起 PostgreSQL 用（依据 docs/实施文档.md S1 关键点 + docs/技术栈构建与说明.md 8.1）
+# S6 会在这份文件上补 app 服务、depends_on: service_healthy 与 migrate deploy 入口。
+#
+# 注意：宿主机 5432 已被本机已有的 PostgreSQL 服务占用，所以这里映射到 55432
+#       （与 .env 里的 DATABASE_URL 一致）。
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_PASSWORD: ${PG_PASSWORD}
+      POSTGRES_DB: zigoai
+    ports:
+      - "55432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      retries: 10
+
+volumes:
+  pgdata:

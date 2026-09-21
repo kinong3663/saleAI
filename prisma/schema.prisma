@@ -1,0 +1,146 @@
+// ZigoAI Mini · 数据层
+// 依据：docs/数据表构建与说明.md 第 4 节（完整 Schema）
+// 依据：docs/实施文档.md S1 —— 只建五张表，CustomerFact / ConversationSummary 不建（它们不进 migration）
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum MessageRole {
+  CUSTOMER
+  SALES
+  SYSTEM
+}
+
+// ─────────────── 租户 ───────────────
+model Tenant {
+  id        String   @id @default(cuid())
+  slug      String   @unique // swimming / machinery
+  name      String
+  industry  String?
+  salesGoal String // 自然语言销售目标
+  tone      String?
+  // rules[] / stageDefs{} / needHumanTriggers[] / products[] / maxFollowUps / priceFallbackReply ...
+  config    Json     @db.JsonB
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @db.Timestamptz(3)
+
+  customers Customer[]
+  messages  Message[]
+  states    CustomerState[]
+  runs      AgentRun[]
+
+  @@map("tenants")
+}
+
+// ─────────────── 客户 ───────────────
+model Customer {
+  id         String    @id @default(cuid())
+  tenantId   String
+  name       String
+  channel    String    @default("manual") // 预留 wechat / phone
+  externalId String? // 渠道侧 ID
+  tags       String    @default("") // 逗号分隔，避免数组类型差异
+  archivedAt DateTime? @db.Timestamptz(3) // 软删除
+  createdAt  DateTime  @default(now()) @db.Timestamptz(3)
+  updatedAt  DateTime  @updatedAt @db.Timestamptz(3)
+
+  tenant   Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  messages Message[]
+  state    CustomerState?
+  runs     AgentRun[]
+
+  @@unique([tenantId, externalId]) // 渠道去重
+  @@index([tenantId, archivedAt, updatedAt]) // 客户列表页
+  @@map("customers")
+}
+
+// ─────────────── 消息 ───────────────
+model Message {
+  id          String      @id @default(cuid())
+  tenantId    String // 冗余：隔离 + 免 join
+  customerId  String
+  role        MessageRole
+  content     String
+  turnId      String? // 连续消息聚合
+  source      String      @default("manual") // manual | ai_suggested | followup
+  clientMsgId String? // 幂等：前端重发不产生重复
+  createdAt   DateTime    @default(now()) @db.Timestamptz(3)
+
+  tenant   Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  customer Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  @@unique([customerId, clientMsgId])
+  @@index([tenantId, customerId, createdAt]) // 会话页拉最近 N 条
+  @@index([customerId, turnId])
+  @@map("messages")
+}
+
+// ─────────────── 客户状态（1:1） ───────────────
+model CustomerState {
+  customerId String @id // 主键即外键，强制 1:1
+  tenantId   String
+
+  leadStage       String    @default("NEW")
+  intent          String?
+  needHuman       Boolean   @default(false)
+  humanReason     String?
+  humanResolvedAt DateTime? @db.Timestamptz(3) // 销售手动解除人工
+
+  followUpCount  Int       @default(0)
+  lastFollowUpAt DateTime? @db.Timestamptz(3)
+
+  lastCustomerMessageAt DateTime? @db.Timestamptz(3)
+  lastSalesMessageAt    DateTime? @db.Timestamptz(3)
+  lastActivityAt        DateTime? @db.Timestamptz(3) // 派生：max(上两者)，为跟进扫描
+  lastAnalysisAt        DateTime? @db.Timestamptz(3)
+
+  version   Int      @default(0) // 乐观锁 + 变更计数
+  updatedAt DateTime @updatedAt @db.Timestamptz(3)
+
+  tenant   Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  customer Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, leadStage, needHuman])
+  @@index([tenantId, lastActivityAt]) // 跟进任务扫描
+  @@map("customer_states")
+}
+
+// ─────────────── AI 判定审计 ───────────────
+model AgentRun {
+  id               String  @id @default(cuid())
+  tenantId         String
+  customerId       String
+  triggerMessageId String?
+
+  status   String // SUCCESS | REPAIRED | FALLBACK | FAILED
+  model    String
+  latencyMs Int
+  attempt  Int    @default(1)
+
+  inputDigest     Json    @db.JsonB // 发给模型的上下文快照
+  rawOutput       String? // 模型原始返回，排障用
+  output          Json?   @db.JsonB // 校验后的结构化结果
+  rulesHit        String  @default("")
+  guardrailIssues String  @default("")
+  error           String?
+
+  // 采纳情况 → 形成反馈闭环
+  suggestionSent   Boolean @default(false)
+  suggestionEdited Boolean @default(false)
+
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+
+  tenant   Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  customer Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  @@unique([customerId, triggerMessageId]) // 幂等：一条消息只判定一次
+  @@index([tenantId, customerId, createdAt])
+  @@index([tenantId, status, createdAt]) // 观察 fallback 率
+  @@map("agent_runs")
+}
