@@ -95,6 +95,9 @@ model CustomerState {
   followUpCount  Int       @default(0)
   lastFollowUpAt DateTime? @db.Timestamptz(3)
 
+  // 历史购买次数：进入 WON 的次数（首次成交 1，重新激活后再成交 = 复购 2）
+  purchaseCount Int @default(0)
+
   lastCustomerMessageAt DateTime? @db.Timestamptz(3)
   lastSalesMessageAt    DateTime? @db.Timestamptz(3)
   lastActivityAt        DateTime? @db.Timestamptz(3) // 派生：max(上两者)，为跟进扫描

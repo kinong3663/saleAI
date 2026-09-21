@@ -18,6 +18,7 @@ import type { AgentOutputLoose } from './schema'
 // 也就是说：护栏逻辑全租户共用，加新租户不用改这个文件。
 //
 export type GuardrailIssue =
+  // 已废弃：终态不再锁死（见下方 G1）。保留它只是为了旧 AgentRun 还能正常渲染
   | 'terminal_stage_locked'
   | 'stage_regression_blocked'
   | 'price_rule_violated'
@@ -56,12 +57,22 @@ export function applyGuardrails(out: AgentOutputLoose, ctx: GuardrailContext): G
   const prev = ctx.prevStage
   const cur = out.lead_stage
 
-  // ── G1 终态锁：WON / LOST 不许被 AI 改回去 ──
-  if (isTerminalStage(prev) && cur !== prev) {
-    out.lead_stage = prev
-    issues.push('terminal_stage_locked')
+  // ── G1 终态可以重新流动（2026-09-21 决定，替代原来的「终态锁」）──
+  //
+  // 原来的规矩是「WON / LOST 不许被 AI 改回去」。它被真实场景撞破了：
+  // 客户成交之后来复购、流失之后又回来问价，阶段却永远停在终态，
+  // 跟进扫描又跳过终态客户 —— 这条回来的线索在系统里等于不存在。
+  //
+  // 现在：终态客户一旦又发来消息，阶段重新流动。之所以敢放开，是因为
+  // 「成交过几次」已经由 CustomerState.purchaseCount 单独记着 —— 阶段不需要再
+  // 兼职保存成交历史。这也是当初锁死唯一真正想保住的东西。
+  //
+  // 这里**同时跳过 G2 阶段单调**：从 WON / LOST 回到 DISCOVERY 在序号上算「回退」，
+  // 但那正是「重新走一遍漏斗」的本意。而非终态之间的回退照旧被 G2 拦住，防抖没丢。
+  if (isTerminalStage(prev)) {
+    // 什么都不做：接受模型给的新阶段
   }
-  // ── G2 阶段单调：不允许回退 ──
+  // ── G2 阶段单调：不允许回退（只对非终态生效） ──
   else if (STAGE_RANK[cur] < STAGE_RANK[prev]) {
     out.lead_stage = prev
     issues.push('stage_regression_blocked')

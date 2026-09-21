@@ -67,20 +67,38 @@ const PRICE_RULE_DOCUMENT: TenantRule = {
 const SWIM_TRIGGERS = ['投诉', '要求真人', '涉及退款', 'AI 无法确认答案']
 const MACHINERY_TRIGGERS = ['投诉', '要求真人', '涉及退款', '纠纷']
 
-describe('G1 终态锁', () => {
-  it('WON 被模型改成 INTERESTED → 输出仍是 WON，并记录 terminal_stage_locked', () => {
+describe('G1 终态可以重新流动（2026-09-21 起不再锁死）', () => {
+  it('WON 之后客户回来，模型判 INTERESTED → 接受，不再压回 WON', () => {
     const result = applyGuardrails(
       modelOutput({ lead_stage: 'INTERESTED' }),
       ctx({ prevStage: 'WON' }),
     )
-    expect(result.output.lead_stage).toBe('WON')
-    expect(result.issues).toContain('terminal_stage_locked')
+    expect(result.output.lead_stage).toBe('INTERESTED')
+    expect(result.issues).not.toContain('terminal_stage_locked')
   })
 
-  it('LOST 也一样锁住', () => {
-    const result = applyGuardrails(modelOutput({ lead_stage: 'WON' }), ctx({ prevStage: 'LOST' }))
-    expect(result.output.lead_stage).toBe('LOST')
-    expect(result.issues).toContain('terminal_stage_locked')
+  it('LOST 也可以随时切回漏斗里的任何阶段', () => {
+    const result = applyGuardrails(
+      modelOutput({ lead_stage: 'DISCOVERY' }),
+      ctx({ prevStage: 'LOST' }),
+    )
+    expect(result.output.lead_stage).toBe('DISCOVERY')
+    expect(result.issues).not.toContain('terminal_stage_locked')
+  })
+
+  it('从终态回到最早阶段也不算 G2 回退（重新走一遍漏斗是本意）', () => {
+    const result = applyGuardrails(modelOutput({ lead_stage: 'NEW' }), ctx({ prevStage: 'LOST' }))
+    expect(result.output.lead_stage).toBe('NEW')
+    expect(result.issues).not.toContain('stage_regression_blocked')
+  })
+
+  it('非终态之间的回退照样被 G2 拦住（防抖没丢）', () => {
+    const result = applyGuardrails(
+      modelOutput({ lead_stage: 'DISCOVERY' }),
+      ctx({ prevStage: 'INTERESTED' }),
+    )
+    expect(result.output.lead_stage).toBe('INTERESTED')
+    expect(result.issues).toContain('stage_regression_blocked')
   })
 
   it('阶段没变时不算问题', () => {

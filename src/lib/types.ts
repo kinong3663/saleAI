@@ -84,6 +84,8 @@ export interface CustomerStateDTO {
   lastActivityAt: string | null
   /** 每次状态变更 +1，用于看出「这条状态改过几次」 */
   version: number
+  /** 历史购买次数（进入 WON 的次数）；重新激活后再成交就是复购 */
+  purchaseCount: number
 }
 
 export interface CustomerSummary {

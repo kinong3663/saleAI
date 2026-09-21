@@ -25,6 +25,7 @@ function toSummary(row: CustomerWithState): CustomerSummary {
           humanResolvedAt: row.state.humanResolvedAt?.toISOString() ?? null,
           lastActivityAt: row.state.lastActivityAt?.toISOString() ?? null,
           version: row.state.version,
+          purchaseCount: row.state.purchaseCount,
         }
       : null,
   }
