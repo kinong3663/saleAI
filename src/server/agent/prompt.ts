@@ -72,7 +72,7 @@ export function buildUserPrompt(ctx: { state: PromptState; history: HistoryRow[]
 //   ② 第六节写着「产品信息不在企业销售目标里就别自行发挥」——
 //      产品放进来，那句约束才有内容可依，模型也才不会对「体验课多少钱」只能空泛反问。
 //
-// 语气只由 Tenant.tone 承载（config.replyTone 已按 配置改造.md §2.3 删除，唯一真源）。
+// 语气只由 Tenant.tone 承载（config.replyTone 已删除，避免同一个语义在两处漂移）。
 //
 function sectionGoal(tenant: TenantLike): string {
   const lines = ['## 一、企业销售目标', tenant.salesGoal]
