@@ -2,6 +2,7 @@
 
 import { useState } from 'react'
 import { useRouter } from 'next/navigation'
+import { randomId } from '@/lib/uuid'
 
 /**
  * 「新增客户消息」输入框 —— Demo 的主入口。
@@ -9,6 +10,7 @@ import { useRouter } from 'next/navigation'
  * 两件事连在一起：写消息 → 触发 AI 判定 → 刷新页面。
  * 每条消息带一个 clientMsgId：真实场景里网络重试/用户连点不该写成两条记录，
  * 兜底靠的是 messages(customerId, clientMsgId) 的唯一约束。
+ * ⚠️ clientMsgId 用 randomId() 而不是 crypto.randomUUID()：后者只在 https/localhost 存在。
  */
 export function MessageComposer({
   tenantId,
@@ -39,7 +41,7 @@ export function MessageComposer({
           tenantId,
           role: 'CUSTOMER',
           content: text,
-          clientMsgId: crypto.randomUUID(),
+          clientMsgId: randomId(),
         }),
       })
       if (!res.ok) {
@@ -60,8 +62,9 @@ export function MessageComposer({
         setError(`消息已保存，但 AI 判定失败（HTTP ${analyzeRes.status}）`)
       }
       router.refresh()
-    } catch {
-      setError('网络错误，请重试')
+    } catch (e) {
+      // 不要把真实原因吞掉 —— 上次就是因为这里只显示「网络错误」，排查多绕了一圈
+      setError(`发送失败：${e instanceof Error ? e.message : String(e)}`)
     } finally {
       setPhase('idle')
     }
