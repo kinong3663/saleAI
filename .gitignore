@@ -1,0 +1,29 @@
+# dependencies
+/node_modules
+/.pnp
+.pnp.*
+
+# next.js
+/.next/
+/out/
+/build
+next-env.d.ts
+
+# production
+/dist
+
+# env（只提交 .env.example）
+.env
+.env*.local
+
+# 本地开发数据库（项目内独立 PG 实例，见 README/验收说明）
+/.devpg/
+
+# logs / misc
+npm-debug.log*
+yarn-error.log*
+.DS_Store
+*.pem
+/.vercel
+/.turbo
+*.tsbuildinfo
