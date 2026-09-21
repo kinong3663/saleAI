@@ -1,16 +1,18 @@
 'use client'
 
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { randomId } from '@/lib/uuid'
 
 /**
  * 「新增客户消息」输入框 —— Demo 的主入口。
  *
- * 两件事连在一起：写消息 → 触发 AI 判定 → 刷新页面。
- * 每条消息带一个 clientMsgId：真实场景里网络重试/用户连点不该写成两条记录，
- * 兜底靠的是 messages(customerId, clientMsgId) 的唯一约束。
- * ⚠️ clientMsgId 用 randomId() 而不是 crypto.randomUUID()：后者只在 https/localhost 存在。
+ * 发送路径上**没有 AI 判定**（依据 docs/消息触发时序.md）：写完消息就立刻回来，
+ * 判定由服务端在响应之后按 B 路径跑（3 秒防抖 + 进程内锁）。
+ * 所以按钮从"发送中…"到可用只有几百毫秒 —— 用户的发送体验不受模型速度影响。
+ *
+ * 建议卡片稍后自动出现：这里在发送后做几次有限刷新（不是长轮询），
+ * 覆盖"3 秒防抖 + 模型 5~15 秒"这段窗口。想立刻看，也可以点上面的「运行判断」。
  */
 export function MessageComposer({
   tenantId,
@@ -21,18 +23,26 @@ export function MessageComposer({
 }) {
   const router = useRouter()
   const [content, setContent] = useState('')
-  const [phase, setPhase] = useState<'idle' | 'sending' | 'analyzing'>('idle')
+  const [sending, setSending] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [hint, setHint] = useState<string | null>(null)
+  const timers = useRef<ReturnType<typeof setTimeout>[]>([])
 
-  const pending = phase !== 'idle'
+  useEffect(() => {
+    return () => {
+      for (const t of timers.current) clearTimeout(t)
+      timers.current = []
+    }
+  }, [])
 
   async function onSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault()
     const text = content.trim()
-    if (!text || pending) return
+    if (!text || sending) return
 
     setError(null)
-    setPhase('sending')
+    setHint(null)
+    setSending(true)
     try {
       const res = await fetch(`/api/customers/${customerId}/messages`, {
         method: 'POST',
@@ -48,25 +58,18 @@ export function MessageComposer({
         setError(`发送失败（HTTP ${res.status}）`)
         return
       }
-      const data = (await res.json()) as { message: { id: string } }
       setContent('')
+      router.refresh() // 消息立刻出现在接诊记录里
+      setHint('消息已发送 · AI 正在后台分析，建议卡片稍后自动出现')
 
-      // 消息落库之后紧接着触发判定（AI 调用在后端，不在数据库事务里）
-      setPhase('analyzing')
-      const analyzeRes = await fetch(`/api/customers/${customerId}/analyze`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ tenantId, triggerMessageId: data.message.id }),
-      })
-      if (!analyzeRes.ok) {
-        setError(`消息已保存，但 AI 判定失败（HTTP ${analyzeRes.status}）`)
+      // 后台判定的典型耗时 = 3 秒防抖 + 模型 5~15 秒；做几次有限刷新覆盖这段窗口
+      for (const delay of [4000, 8000, 14000, 20000]) {
+        timers.current.push(setTimeout(() => router.refresh(), delay))
       }
-      router.refresh()
     } catch (e) {
-      // 不要把真实原因吞掉 —— 上次就是因为这里只显示「网络错误」，排查多绕了一圈
       setError(`发送失败：${e instanceof Error ? e.message : String(e)}`)
     } finally {
-      setPhase('idle')
+      setSending(false)
     }
   }
 
@@ -79,19 +82,16 @@ export function MessageComposer({
         value={content}
         onChange={(e) => setContent(e.target.value)}
       />
-      <div className="mt-2 flex items-center gap-3">
+      <div className="mt-2 flex flex-wrap items-center gap-3">
         <button
           type="submit"
-          disabled={pending}
+          disabled={sending}
           className="rounded bg-slate-900 px-3 py-1.5 text-sm text-white disabled:opacity-50"
         >
-          {phase === 'sending'
-            ? '发送中…'
-            : phase === 'analyzing'
-              ? 'AI 判定中…'
-              : '以客户身份发送'}
+          {sending ? '发送中…' : '以客户身份发送'}
         </button>
         {error && <span className="text-sm text-red-600">{error}</span>}
+        {hint && <span className="text-xs text-slate-500">{hint}</span>}
       </div>
     </form>
   )

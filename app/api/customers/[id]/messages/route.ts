@@ -1,5 +1,6 @@
-import { NextResponse, type NextRequest } from 'next/server'
+import { after, NextResponse, type NextRequest } from 'next/server'
 import { z } from 'zod'
+import { scheduleAnalyze } from '@/server/agent/scheduler'
 import { NotFoundError } from '@/server/errors'
 import { appendMessage, sendSalesReply } from '@/server/services/message.service'
 
@@ -20,10 +21,11 @@ const AppendMessageInput = z.object({
  *
  * ⚠️ role=SALES 不会被「裸写」进库：它转给 sendSalesReply，走同一条事务
  * （更新 lastSalesMessageAt / lastActivityAt、回填 suggestionSent / suggestionEdited）。
- * 否则跟进扫描依赖的 `lastSalesMessageAt > lastCustomerMessageAt` 会被绕过，
- * 而 S8 的「客户没回我」判定正建立在这个时间戳上。
- * 这条路径的 source 由 runId 推导（带 runId = ai_suggested，否则 manual），
- * 请求体里的 source 对 SALES 无效。
+ *
+ * ⚠️ AI 判定**不在这个请求里**（依据 docs/消息触发时序.md）：
+ * 写完客户消息后立刻返回，判定交给 after() 在响应之后按 B 路径跑。
+ * 模型的 5~15 秒延迟会被用户感知成"消息发不出去"，所以发送路径必须干净。
+ * 用 after() 而不是裸的 void fn() —— 后者异常时是 unhandled rejection。
  */
 export async function POST(
   req: NextRequest,
@@ -56,6 +58,12 @@ export async function POST(
     }
 
     const message = await appendMessage(tenantId, id, { role, content, source, clientMsgId })
+
+    // 客户消息：判定放到响应之后，且带 3 秒防抖（连发多条只分析最后一次）
+    if (role === 'CUSTOMER') {
+      after(() => scheduleAnalyze(tenantId, id, message.id))
+    }
+
     return NextResponse.json({ message }, { status: 201 })
   } catch (e) {
     if (e instanceof NotFoundError) {
